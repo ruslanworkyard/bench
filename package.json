@@ -1,0 +1,18 @@
+{
+  "name": "harnessbench",
+  "version": "0.1.0",
+  "description": "Regression tests for your CLAUDE.md.",
+  "license": "MIT",
+  "type": "module",
+  "bin": { "harnessbench": "./dist/cli.js" },
+  "files": ["dist"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}
