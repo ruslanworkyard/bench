@@ -47,7 +47,11 @@ function detectTestCommand(cwd: string): string {
     const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as {
       scripts?: Record<string, string>;
     };
-    return pkg.scripts?.test ? "npm test" : "";
+    const script = pkg.scripts?.test?.trim();
+    if (!script) return "";
+    // `npm init` seeds a placeholder that only prints an error; treat it as no test command.
+    if (/no test specified/i.test(script) && /exit 1/.test(script)) return "";
+    return "npm test";
   } catch {
     return "";
   }
