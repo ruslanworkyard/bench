@@ -8,7 +8,6 @@ import { after, test } from "node:test";
 import { CONFIG_FILE, FIXTURES_DIR, STATE_DIR } from "./config.js";
 import { CliError } from "./errors.js";
 import {
-  dirtyHarnessFiles,
   requireBaseBranch,
   requireConfig,
   requireFixture,
@@ -150,38 +149,4 @@ test("requireFixture reads the fixture, and lists what exists for an unknown id"
 
   const error = cliError(() => requireFixture(root, "nope"), /unknown fixture 'nope'/);
   assert.match(error.message, /available fixtures:\n {2}announcements\n {2}ttl-cache/);
-});
-
-test("dirtyHarnessFiles only reports harness files that changed", () => {
-  const root = repo();
-  const harness = ["CLAUDE.md"];
-
-  assert.deepEqual(dirtyHarnessFiles(root, harness), []);
-
-  write(root, "src.txt", "changed code\n");
-  assert.deepEqual(dirtyHarnessFiles(root, harness), []);
-
-  write(root, "CLAUDE.md", "# House rules, revised\n");
-  assert.deepEqual(dirtyHarnessFiles(root, harness), ["CLAUDE.md"]);
-});
-
-test("dirtyHarnessFiles reports untracked and renamed harness files", () => {
-  const root = repo();
-  mkdirSync(join(root, ".claude"), { recursive: true });
-  write(root, ".claude/rules.md", "be careful\n");
-
-  assert.deepEqual(dirtyHarnessFiles(root, [".claude/rules.md"]), [".claude/rules.md"]);
-
-  git(root, "add", "-A");
-  git(root, "commit", "--quiet", "-m", "rules");
-  git(root, "mv", ".claude/rules.md", ".claude/guidelines.md");
-
-  assert.deepEqual(dirtyHarnessFiles(root, [".claude/"]), [".claude/guidelines.md"]);
-});
-
-test("dirtyHarnessFiles with no harness paths asks git nothing", () => {
-  const root = repo();
-  write(root, "src.txt", "changed code\n");
-
-  assert.deepEqual(dirtyHarnessFiles(root, []), []);
 });

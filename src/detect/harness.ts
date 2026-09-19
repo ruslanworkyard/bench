@@ -1,6 +1,8 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
+import { gitRaw } from "./git.js";
+
 /** A harness file, with an explanation of why it is part of the harness. */
 export type HarnessEntry = { path: string; source: string };
 
@@ -118,4 +120,23 @@ export function harnessFiles(root: string): HarnessEntry[] {
   }
 
   return [...entries.values()];
+}
+
+/** Harness files with uncommitted changes. Callers decide whether that matters. */
+export function dirtyHarnessFiles(root: string, harnessPaths: readonly string[]): string[] {
+  if (harnessPaths.length === 0) return [];
+  // -z keeps paths verbatim: no quoting, no escaping, no ambiguity about spaces.
+  // Raw, because a status code can start with a space that slicing depends on.
+  const output = gitRaw(["status", "--porcelain", "-z", "--", ...harnessPaths], root);
+  if (output === null) return [];
+
+  const entries = output.split("\0").filter((entry) => entry !== "");
+  const dirty: string[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i] as string;
+    dirty.push(entry.slice(3));
+    // A rename or copy is followed by its origin path, which is not a change of its own.
+    if (/[RC]/.test(entry.slice(0, 2))) i++;
+  }
+  return dirty.sort();
 }

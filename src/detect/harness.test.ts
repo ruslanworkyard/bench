@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 
-import { harnessFiles } from "./harness.js";
+import { dirtyHarnessFiles, harnessFiles } from "./harness.js";
 
 const roots: string[] = [];
 
@@ -18,6 +19,34 @@ function tree(files: Record<string, string>): string {
     writeFileSync(target, content, "utf8");
   }
   return root;
+}
+
+/** Isolated from the user's git config, so init.defaultBranch cannot change results. */
+const GIT_ENV = {
+  ...process.env,
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_SYSTEM: "/dev/null",
+  GIT_AUTHOR_NAME: "harnessbench",
+  GIT_AUTHOR_EMAIL: "harnessbench@example.com",
+  GIT_COMMITTER_NAME: "harnessbench",
+  GIT_COMMITTER_EMAIL: "harnessbench@example.com",
+};
+
+function git(root: string, ...args: string[]): void {
+  execFileSync("git", args, { cwd: root, env: GIT_ENV, stdio: "ignore" });
+}
+
+/** A repository on `main` with a committed CLAUDE.md and one unrelated file. */
+function repo(): string {
+  const root = tree({ "CLAUDE.md": "# House rules\n", "src.txt": "code\n" });
+  git(root, "init", "--quiet", "-b", "main");
+  git(root, "add", "-A");
+  git(root, "commit", "--quiet", "-m", "initial");
+  return root;
+}
+
+function write(root: string, path: string, content: string): void {
+  writeFileSync(join(root, path), content, "utf8");
 }
 
 function paths(root: string): string[] {
@@ -116,4 +145,38 @@ test("node_modules, .git and .harnessbench are skipped", () => {
 
 test("a repository with no harness files", () => {
   assert.deepEqual(harnessFiles(tree({ "src/index.ts": "" })), []);
+});
+
+test("dirtyHarnessFiles only reports harness files that changed", () => {
+  const root = repo();
+  const harness = ["CLAUDE.md"];
+
+  assert.deepEqual(dirtyHarnessFiles(root, harness), []);
+
+  write(root, "src.txt", "changed code\n");
+  assert.deepEqual(dirtyHarnessFiles(root, harness), []);
+
+  write(root, "CLAUDE.md", "# House rules, revised\n");
+  assert.deepEqual(dirtyHarnessFiles(root, harness), ["CLAUDE.md"]);
+});
+
+test("dirtyHarnessFiles reports untracked and renamed harness files", () => {
+  const root = repo();
+  mkdirSync(join(root, ".claude"), { recursive: true });
+  write(root, ".claude/rules.md", "be careful\n");
+
+  assert.deepEqual(dirtyHarnessFiles(root, [".claude/rules.md"]), [".claude/rules.md"]);
+
+  git(root, "add", "-A");
+  git(root, "commit", "--quiet", "-m", "rules");
+  git(root, "mv", ".claude/rules.md", ".claude/guidelines.md");
+
+  assert.deepEqual(dirtyHarnessFiles(root, [".claude/"]), [".claude/guidelines.md"]);
+});
+
+test("dirtyHarnessFiles with no harness paths asks git nothing", () => {
+  const root = repo();
+  write(root, "src.txt", "changed code\n");
+
+  assert.deepEqual(dirtyHarnessFiles(root, []), []);
 });

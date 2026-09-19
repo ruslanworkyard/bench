@@ -1,7 +1,6 @@
 import { git } from "../detect/git.js";
-import { harnessFiles } from "../detect/harness.js";
+import { dirtyHarnessFiles, harnessFiles } from "../detect/harness.js";
 import {
-  dirtyHarnessFiles,
   requireAgent,
   requireBaseBranch,
   requireConfig,

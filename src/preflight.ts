@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import { CONFIG_FILE, FIXTURES_DIR, load, type Config } from "./config.js";
 import { agentPath } from "./detect/agents.js";
-import { git, gitRaw, repoRoot } from "./detect/git.js";
+import { git, repoRoot } from "./detect/git.js";
 import { CliError } from "./errors.js";
 import { listFixtures, validateFixture, type FixtureMeta } from "./fixtures.js";
 
@@ -87,23 +87,4 @@ export function requireFixture(root: string, id: string): LoadedFixture {
     throw new CliError(`fixture '${id}' has no prompt.md`, 1);
   }
   return { dir, fixture, prompt: readFileSync(promptPath, "utf8") };
-}
-
-/** Harness files with uncommitted changes. Callers decide whether that matters. */
-export function dirtyHarnessFiles(root: string, harnessPaths: readonly string[]): string[] {
-  if (harnessPaths.length === 0) return [];
-  // -z keeps paths verbatim: no quoting, no escaping, no ambiguity about spaces.
-  // Raw, because a status code can start with a space that slicing depends on.
-  const output = gitRaw(["status", "--porcelain", "-z", "--", ...harnessPaths], root);
-  if (output === null) return [];
-
-  const entries = output.split("\0").filter((entry) => entry !== "");
-  const dirty: string[] = [];
-  for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i] as string;
-    dirty.push(entry.slice(3));
-    // A rename or copy is followed by its origin path, which is not a change of its own.
-    if (/[RC]/.test(entry.slice(0, 2))) i++;
-  }
-  return dirty.sort();
 }

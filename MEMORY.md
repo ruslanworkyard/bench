@@ -52,16 +52,46 @@ worktree (`$TMPDIR/harnessbench/<run>/tree`) with an isolated `HOME` for the age
 
 ## Code structure (src/)
 
-- `cli.ts` — argv → command, catches `CliError`, sets exit code. Nothing else.
-- `commands/init.ts` — detect → plan → apply → print.
-- `detect/` — pure detectors returning `{ value, source } | null`: `git.ts`, `harness.ts`,
-  `test-command.ts`, `agents.ts`. They never write or decide.
+Files are grouped by **what they are allowed to do to the world**, not by feature. Two axes.
+
+**Roles** — each file has exactly one relationship to the outside:
+
+| Place | Job | Signature |
+|---|---|---|
+| `detect/` | ask the world a question | `x(): Detection<T> \| null` — never throws, never writes |
+| `preflight.ts` | turn a `null` into a decision | `requireX(): T` — throws `CliError` carrying the fix |
+| `plan.ts` | the only thing that writes | build `FileOp[]`, then `apply()` |
+| `print.ts` | the only thing that formats | `format*(data): string` |
+| `commands/` | compose the above, in order | detect → plan → apply → print |
+| `cli.ts` | argv, exit codes | nothing else |
+
+**Domain nouns** — an object that appears in several layers gets its own top-level file:
 - `config.ts` — `Config` type, defaults, load/validate.
-- `fixtures.ts` — locate packaged fixtures via `import.meta.url`, copy into host.
-- `plan.ts` — `FileOp` union; `apply()` is the only place that touches disk. Gives `--dry-run`
-  and idempotence for free.
-- `print.ts` — summary formatting.
-- Tests: `node:test`, `npm test` → `node --test 'dist/**/*.test.js'`.
+- `fixtures.ts` — locate packaged fixtures via `import.meta.url`, copy into the host.
+- `workspace.ts` — a throwaway clone of the host + an isolated HOME, for one run.
+- `errors.ts` — `CliError`, the shared vocabulary at the bottom of the graph.
+
+Imports form a DAG, checked by eye: `detect/*` imports nothing internal but `detect/types.ts`;
+`plan.ts` and `errors.ts` import nothing; every arrow points down. No barrel `index.ts` files —
+the explicit paths are what make the layering legible.
+
+What the split buys: `--dry-run` and idempotence are free because one function writes; detectors
+are testable with a temp dir and no mocks; every error message is in one file, so they are
+consistently actionable.
+
+Split triggers (do not pre-empt them):
+- `runtime/` when `workspace.ts` gets its second sibling (agent runner, harness overlay, judge).
+- `print/init.ts` + `print/run.ts` + `print/format.ts` when a third command formats output. The
+  data shapes (`Report`, `RunPlan`) move to the file that produces them; `print.ts` keeps the
+  presentation.
+- `validate.ts` on the third hand-rolled JSON validator (`config.ts` and `fixtures.ts` each carry
+  their own `describe`/`fail` today; two is not yet duplication worth an abstraction).
+
+Avoid: feature folders (`init/`, `run/` each with their own detect+print) — they kill the
+single-writer and single-formatter invariants; a `types.ts` dumping ground.
+
+Tests: `node:test`, colocated as `x.test.ts` beside `x.ts`; `npm test` → `node --test
+'dist/**/*.test.js'`, so the suite exercises the built artifact. Excluded from the package.
 
 ## Done
 
@@ -75,6 +105,9 @@ worktree (`$TMPDIR/harnessbench/<run>/tree`) with an isolated `HOME` for the age
   (HTTP client to fictional `api.holidaze.example` with mocked tests, retries, typed errors),
   `ttl-cache` (TTL+LRU cache applied to one expensive read).
 - README with pitch, how it works, principles, honest status.
+- `workspace.ts`: shallow clone of the host at a ref into `$TMPDIR/harnessbench/<runId>`, origin
+  removed, hooks disabled, empty HOME; `exec` in its own process group (killed as a group on
+  timeout, output streamed), `diff`, `destroy`, `withWorkspace`. ~100 ms to create on this repo.
 
 ## Next
 
