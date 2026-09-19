@@ -115,6 +115,7 @@ test("a run reaches the agent, and its stream comes back whole", async () => {
     workspace: ws,
     prompt: "Add a TTL cache.\n",
     rawOutputPath,
+    stderrPath: join(scratch, "agent.stderr.log"),
     config: config({
       command: fixture("fake-claude.sh"),
       model: "claude-opus-5",
@@ -174,6 +175,7 @@ test("no model means no settings file and no --model", async () => {
     workspace: ws,
     prompt: "Go.\n",
     rawOutputPath: join(scratch, "raw.jsonl"),
+    stderrPath: join(scratch, "agent.stderr.log"),
     config: config({
       command: fixture("fake-claude.sh"),
       env: ["FAKE_CLAUDE_STREAM", "FAKE_CLAUDE_DUMP"],
@@ -199,6 +201,7 @@ test("an agent that hangs is a timeout, and leaves nothing behind", async () => 
     workspace: ws,
     prompt: "Go.\n",
     rawOutputPath: join(scratch, "raw.jsonl"),
+    stderrPath: join(scratch, "agent.stderr.log"),
     config: config({ command: fixture("slow-claude.sh"), timeoutMinutes: 0.01 }),
   });
 
@@ -219,10 +222,13 @@ test("an agent that exits non-zero is an error, explained by its stderr", async 
     workspace: ws,
     prompt: "Go.\n",
     rawOutputPath: join(scratch, "raw.jsonl"),
+    stderrPath: join(scratch, "logs", "agent.stderr.log"),
     config: config({ command: fixture("failing-claude.sh") }),
   });
 
   assert.equal(result.outcome, "error");
+  // Its stderr is on disk whole, for the run directory to keep.
+  assert.equal(readFileSync(join(scratch, "logs", "agent.stderr.log"), "utf8"), "claude: invalid API key\n");
   assert.equal(result.exitCode, 2);
   assert.equal(result.model, null);
   assert.equal(result.turns, 0);

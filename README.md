@@ -75,17 +75,40 @@ The config it writes is small and meant to be edited by hand:
 
 Credentials are never stored in the config. harnessbench forwards the agent's own environment variables from your shell — `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or the Bedrock and Vertex settings — and refuses to start when none of them is set. The agent runs in a disposable clone of your repository with its own `HOME` and its own config directory, so your `~/.claude` is neither read nor written, and nothing it does can reach the original repository.
 
+Then run a fixture:
+
+```sh
+npx harnessbench run ttl-cache
+```
+
+`run` clones the current `HEAD` into a disposable workspace, hands the fixture's prompt to the agent there, captures the diff, runs your test command against the result, and writes everything to `.harnessbench/runs/<timestamp>-<fixture>-candidate/`: the agent's raw output stream, a normalised `transcript.jsonl`, `diff.patch`, `test.log`, `agent.stderr.log` and a `run.json` with the outcome, telemetry and test result. It then prints a one-screen summary:
+
+```
+harnessbench run  ttl-cache  → completed in 4m12s
+
+Agent      claude-code · claude-sonnet-4-5
+Turns      23   Tool calls  41 (Read 18, Edit 9, Bash 14)   Tool failures 2
+Tokens     in 1,203  out 18,940  cache read 402,113  cache write 10,004
+Cost       $0.38
+Changes    5 files, +212 / -7
+Tests      npm test → passed in 12s
+Run dir    .harnessbench/runs/20260919-031455-ttl-cache-candidate
+
+Final message: Added a TTL cache and wired it into the expensive read.
+```
+
+`--json` prints `run.json` instead, `--keep` leaves the workspace on disk and prints its path, and `--max-turns` and `--model` override the config for one run. The exit code reports the agent, not your tests: 0 when it completed, 2 when it timed out, 3 when it failed, 1 for anything wrong with the setup. A failing test suite is a result, recorded in `run.json`, not an error.
+
 Requires Node.js 20 or later and a git repository.
 
 ## Status
 
-Early. `init` works, three fixtures ship, and the Claude Code adapter is written and tested — but `run` still stops after preflight, so no agent is executed yet. The rough order of what comes next:
+Early. `init` and `run` work, three fixtures ship, and the Claude Code adapter is written and tested. Every run is a `candidate` run for now: there is no `previous` side to compare against yet, so what you get is one measured run per fixture. The rough order of what comes next:
 
-1. `run <fixture>`: wire the adapter in — a disposable clone of the current branch, capturing diff, tests and telemetry
-2. Harness overlay: `previous` vs `candidate` for the same fixture
-3. Pairwise judge with default rubrics
-4. `compare`, Markdown report, and a GitHub Action that comments on PRs touching harness files
-5. Further agent adapters
+1. Harness overlay: `previous` vs `candidate` for the same fixture
+2. Pairwise judge with default rubrics
+3. `compare`, Markdown report, and a GitHub Action that comments on PRs touching harness files
+4. Further agent adapters
 
 If you're reading this because you have the same problem, open an issue and describe how you'd want to test your harness. Fixture design is the part where real examples help most.
 

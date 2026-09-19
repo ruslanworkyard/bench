@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -115,6 +116,12 @@ export async function createWorkspace(options: WorkspaceOptions): Promise<Worksp
   const tree = join(dir, "tree");
   const home = join(dir, "home");
   const hooks = join(dir, "no-hooks");
+  if (existsSync(dir)) {
+    throw new CliError(
+      `workspace ${dir} already exists (left by --keep, or a run started this second?) - ` +
+        `remove it, or run again`,
+    );
+  }
   await mkdir(home, { recursive: true });
   await mkdir(hooks, { recursive: true });
 

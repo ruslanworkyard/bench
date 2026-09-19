@@ -13,6 +13,8 @@ export type AgentRequest = {
   config: AgentConfig;
   /** The adapter streams the agent's untouched stdout here, as it arrives. */
   rawOutputPath: string;
+  /** And its stderr here, whole; the run keeps it to explain an agent that failed. */
+  stderrPath: string;
 };
 
 export type AgentResult = {

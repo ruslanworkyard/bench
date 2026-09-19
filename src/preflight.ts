@@ -1,10 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 
 import { getAdapter } from "./agents/index.js";
 import type { AgentAdapter } from "./agents/types.js";
 import { CONFIG_FILE, FIXTURES_DIR, load, type AgentConfig, type Config } from "./config.js";
-import { agentPath } from "./detect/agents.js";
+import { agentPath, isExecutable } from "./detect/agents.js";
 import { git, repoRoot } from "./detect/git.js";
 import { CliError } from "./errors.js";
 import { listFixtures, validateFixture, type FixtureMeta } from "./fixtures.js";
@@ -65,10 +65,12 @@ export function requireAgentCommand(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
   const command = config.command === "" ? adapter.defaultCommand : config.command;
-  const path = agentPath(command, env);
+  // A path is taken as it is; only a bare name is looked up.
+  const path = command.includes(sep) ? (isExecutable(command) ? command : null) : agentPath(command, env);
   if (path === null) {
+    const where = command.includes(sep) ? "" : " on PATH";
     throw new CliError(
-      `agent command '${command}' not found on PATH - install ${adapter.name}, ` +
+      `agent command '${command}' not found${where} - install ${adapter.name}, ` +
         `or set "agent.command" in ${CONFIG_FILE}`,
       1,
     );

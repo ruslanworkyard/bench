@@ -3,8 +3,8 @@ import { init } from "./commands/init.js";
 import { run } from "./commands/run.js";
 import { CliError } from "./errors.js";
 
-const VALUE_FLAGS = new Set(["base", "test", "agent"]);
-const BOOLEAN_FLAGS = new Set(["dry-run", "json", "help"]);
+const VALUE_FLAGS = new Set(["base", "test", "agent", "max-turns", "model"]);
+const BOOLEAN_FLAGS = new Set(["dry-run", "json", "keep", "help"]);
 
 const HELP = `harnessbench - Regression tests for your CLAUDE.md.
 
@@ -16,9 +16,15 @@ Options:
   --base <branch>   Base branch to compare against (overrides config/detection)
   --test <command>  Test command (init only; overrides detection)
   --agent <name>    Agent to drive, by adapter name (overrides config/detection)
+  --max-turns <n>   Agent turn limit for this run (run only; overrides config)
+  --model <name>    Model for this run (run only; overrides config)
+  --keep            Leave the run's workspace on disk (run only; path printed)
   --dry-run         Report what init would do, without writing anything
   --json            Print the summary as one JSON object
-  -h, --help        Show this help`;
+  -h, --help        Show this help
+
+Exit codes (run): 0 completed, 2 agent timed out, 3 agent error, 1 anything else.
+A failing test suite is a result, not an error: it does not change the exit code.`;
 
 type Flags = Record<string, string | true>;
 
@@ -56,7 +62,20 @@ function value(flags: Flags, name: string): string | undefined {
   return flag;
 }
 
-function main(argv: string[]): number {
+function positiveInteger(flags: Flags, name: string): number | undefined {
+  const raw = value(flags, name);
+  if (raw === undefined) return undefined;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new CliError(`option "--${name}" needs a positive integer, got "${raw}"`, 2);
+  }
+  return parsed;
+}
+
+/** What the shell learns from a run: the agent's outcome, never the test suite's. */
+const RUN_EXIT_CODES = { completed: 0, timeout: 2, error: 3 } as const;
+
+async function main(argv: string[]): Promise<number> {
   const { positional, flags } = parse(argv);
   const command = positional[0];
   if (flags["help"] === true || command === undefined || command === "help") {
@@ -79,23 +98,28 @@ function main(argv: string[]): number {
     if (fixtureId === undefined) {
       throw new CliError(`run needs a fixture id\n\n${HELP}`, 2);
     }
-    run({
+    const record = await run({
       cwd: process.cwd(),
       fixtureId,
       base: value(flags, "base"),
       agent: value(flags, "agent"),
+      maxTurns: positiveInteger(flags, "max-turns"),
+      model: value(flags, "model"),
+      keep: flags["keep"] === true,
+      json: flags["json"] === true,
     });
-    return 0;
+    return RUN_EXIT_CODES[record.outcome];
   }
   throw new CliError(`unknown command "${command}"\n\n${HELP}`, 2);
 }
 
-try {
-  process.exit(main(process.argv.slice(2)));
-} catch (error) {
-  if (error instanceof CliError) {
-    console.error(`harnessbench: ${error.message}`);
-    process.exit(error.exitCode);
-  }
-  throw error;
-}
+main(process.argv.slice(2)).then(
+  (code) => process.exit(code),
+  (error: unknown) => {
+    if (error instanceof CliError) {
+      console.error(`harnessbench: ${error.message}`);
+      process.exit(error.exitCode);
+    }
+    throw error;
+  },
+);

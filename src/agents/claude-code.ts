@@ -86,7 +86,7 @@ export const claudeCode: AgentAdapter = {
   credentialEnv: CREDENTIAL_ENV,
 
   async run(request: AgentRequest): Promise<AgentResult> {
-    const { workspace, config, prompt, rawOutputPath } = request;
+    const { workspace, config, prompt, rawOutputPath, stderrPath } = request;
     if (!existsSync(workspace.tree)) {
       throw new Error(`no workspace at ${workspace.tree}`);
     }
@@ -99,7 +99,9 @@ export const claudeCode: AgentAdapter = {
     }
 
     await mkdir(dirname(rawOutputPath), { recursive: true });
+    await mkdir(dirname(stderrPath), { recursive: true });
     const raw = createWriteStream(rawOutputPath);
+    const errors = createWriteStream(stderrPath);
     const parser = new StreamParser();
     let pending = "";
     let stderr = "";
@@ -117,14 +119,12 @@ export const claudeCode: AgentAdapter = {
         }
       },
       onStderr: (chunk) => {
+        errors.write(chunk);
         stderr = (stderr + chunk).slice(-MAX_STDERR_CHARS);
       },
     });
     if (pending !== "") parser.push(pending); // A last line with no newline.
-    await new Promise<void>((resolve, reject) => {
-      raw.on("error", reject);
-      raw.end(resolve);
-    });
+    await Promise.all([finished(raw), finished(errors)]);
 
     const parsed = parser.finish();
     const outcome = exec.timedOut
@@ -156,6 +156,13 @@ export const claudeCode: AgentAdapter = {
     };
   },
 };
+
+function finished(stream: NodeJS.WritableStream): Promise<void> {
+  return new Promise((resolve, reject) => {
+    stream.on("error", reject);
+    stream.end(resolve);
+  });
+}
 
 function exited(exitCode: number | null, stderr: string): string {
   const how = exitCode === null ? "was killed" : `exited with code ${exitCode}`;

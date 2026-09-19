@@ -80,6 +80,9 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
   keys at any level are an error naming the key: a typo is otherwise a silently ignored setting.
 - `fixtures.ts` — locate packaged fixtures via `import.meta.url`, copy into the host.
 - `workspace.ts` — a throwaway clone of the host + an isolated HOME, for one run.
+- `run-record.ts` — `RunRecord` (`run.json`, `schema: 1`), `writeRunRecord`, `readRunRecord`.
+  Later commands (compare, judge) read a run only through `readRunRecord`, which rejects any
+  other schema number; that is the one place run-file compatibility lives.
 - `errors.ts` — `CliError`, the shared vocabulary at the bottom of the graph.
 
 Imports form a DAG, checked by eye: `detect/*` imports nothing internal but `detect/types.ts`;
@@ -87,6 +90,11 @@ Imports form a DAG, checked by eye: `detect/*` imports nothing internal but `det
 the explicit paths are what make the layering legible. `agents/index.ts` is the one exception,
 and is not a barrel: it is the registry that turns a config's `agent.name` into an adapter, and
 the only file that knows which adapters exist.
+
+One exception to "plan.ts is the only writer": a run's own directory (`.harnessbench/runs/<id>/`)
+is written directly by `commands/run.ts`, the adapter (`raw.jsonl`, `agent.stderr.log`) and
+`run-record.ts`, because its files are streamed while the agent runs and there is nothing to
+dry-run or plan. Everything under `.harnessbench/runs/` is gitignored output, not state.
 
 What the split buys: `--dry-run` and idempotence are free because one function writes; detectors
 are testable with a temp dir and no mocks; every error message is in one file, so they are
@@ -141,15 +149,27 @@ a fake shell script stands in, so the suite is free, offline and deterministic.
   and empty arrays present, and refuses an unknown `--agent` rather than writing a config that
   cannot run. Preflight resolves the command on PATH and checks credentials.
 
+- `run <fixture-id>` end to end (2026-09-19): preflight → workspace at HEAD → adapter with the
+  fixture's prompt → `diff.patch` → test command in the workspace (10 min cap, output to
+  `test.log`) → `transcript.jsonl` + `run.json` → summary (`formatRun`). Run id is
+  `<YYYYMMDD-HHMMSS UTC>-<fixture>-candidate`; the environment is fixed to `candidate` until the
+  overlay exists, and the name already carries it. The run dir is created before the agent
+  starts so a crash still leaves `raw.jsonl`. Exit codes: 0 completed, 2 timeout, 3 agent
+  error, 1 preflight; a failing test suite is a result, not an exit code. Flags `--keep`,
+  `--json`, `--max-turns`, `--model`. The adapter contract gained `stderrPath` (agent stderr
+  streamed whole to `agent.stderr.log`; the summary shows its last 5 lines on an error).
+  `agent.command` may now be a path, taken as it is; only a bare name is looked up on PATH.
+  Run ids have one-second resolution: `createWorkspace` refuses an existing directory with a
+  message that names `--keep` as the likely cause, rather than cloning into it.
+  Not yet done: one real run with a real key (`npx . run ttl-cache --max-turns 20 --keep`) and
+  reading its `run.json`, `diff.patch`, `transcript.jsonl` by hand.
+
 ## Next
 
 1. Test `init --dry-run` on a real repo with a real `CLAUDE.md`; check the harness list,
    test command and base branch are right. Fix what's wrong.
-2. `run <fixture-id>` end to end. The pieces exist and are tested separately; `run` still
-   stops after preflight and executes nothing. What is left is the composition: create the
-   workspace at HEAD → call the adapter with the fixture's prompt → capture the diff → run
-   the test command in the workspace → write `.harnessbench/runs/<ts>-<id>/` (raw stream,
-   diff, result JSON) → print the summary. No harness overlay yet.
+2. Real-agent smoke of `run` (see above); fix what the real stream shows that the recording
+   did not.
 3. Harness overlay: materialise `previous` by writing base-branch versions of harness files
    (deleting ones absent there); hash the resolved harness set and print it.
 4. Judge: pairwise, blind, position-swapped, structured output; default rubrics.

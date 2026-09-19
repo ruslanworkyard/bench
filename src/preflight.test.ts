@@ -154,6 +154,21 @@ test("requireAgentCommand prefers the configured command over the adapter's own"
   assert.match(error.message, /"agent\.command"/);
 });
 
+test("requireAgentCommand takes a path to a binary as it is, without searching PATH", () => {
+  const bin = tempDir();
+  const script = join(bin, "fake-claude.sh");
+  writeFileSync(script, "#!/bin/sh\nexit 0\n", "utf8");
+  chmodSync(script, 0o755);
+  const agent = { ...defaults().agent, command: script };
+
+  assert.equal(requireAgentCommand(claudeCode, agent, { PATH: "/nonexistent" }), script);
+
+  cliError(
+    () => requireAgentCommand(claudeCode, { ...agent, command: join(bin, "missing.sh") }, { PATH: bin }),
+    /agent command '.*missing\.sh' not found/,
+  );
+});
+
 test("requireCredentials accepts any one of the agent's variables, and names them all", () => {
   assert.doesNotThrow(() => requireCredentials(claudeCode, { ANTHROPIC_AUTH_TOKEN: "t" }));
 

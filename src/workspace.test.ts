@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
+import { CliError } from "./errors.js";
 import { createWorkspace, withWorkspace, type Workspace } from "./workspace.js";
 
 const hosts: string[] = [];
@@ -88,6 +89,21 @@ test("a shallow clone of HEAD, with the host left alone", async () => {
   assert.equal(git(root, "for-each-ref"), refsBefore);
   assert.equal(existsSync(join(root, ".git", "worktrees")), false);
   assert.equal(git(root, "worktree", "list").split("\n").length, 1);
+});
+
+test("a workspace whose directory already exists is refused, naming it", async () => {
+  const root = host();
+  const runId = `test-${process.pid}-${runIds++}`;
+  const first = await createWorkspace({ repoRoot: root, ref: "main", runId });
+  workspaces.push(first);
+
+  await assert.rejects(
+    createWorkspace({ repoRoot: root, ref: "main", runId }),
+    (error: unknown) =>
+      error instanceof CliError &&
+      error.message.includes(first.dir) &&
+      /already exists.*--keep/.test(error.message),
+  );
 });
 
 test("depth 0 clones the whole history", async () => {
