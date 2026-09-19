@@ -10,6 +10,17 @@ HarnessBench regression-tests AI coding harness changes such as `CLAUDE.md`, `.c
 * Run tests with `npm test`.
 * Do not claim a change works unless both pass.
 
+## Working method
+
+* Delegate exploration. Do not read files one by one on the main thread to learn the codebase.
+  Send reconnaissance to a sub-agent (the `Explore` agent, preferably Haiku): "which files implement X,
+  and what conventions do they follow?" Read on the main thread only the files you are about to
+  change and the one or two they are modelled on.
+* Start from the module map below and `MEMORY.md`; they say which file owns what, so most
+  questions are answered before any file is opened.
+* Build and test once the change is written, not after every edit. Read the failure, fix the
+  cause, re-run.
+
 ## Engineering rules
 
 * Preserve HarnessBench's isolation guarantees. Agents run in disposable workspaces with isolated configuration and must not modify the host repository.
