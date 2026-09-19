@@ -32,6 +32,8 @@ pointing down; import by explicit path, never through a barrel.
 - Comment the why, not the what: a one-line `/** */` on each export, an inline comment only where
   a reader would otherwise ask "why this?".
 - Keep functions small and named for their role: `requireX`, `formatX`, `x(): Detection<T> | null`.
+- When you add a new module, give it exactly one exported entry point, colocate its test, and
+  add a one-line entry for it under "Code structure" in `MEMORY.md` in the same change.
 - Preserve the isolation guarantees: the agent works in a disposable clone with its own `HOME`
   and config directory, and nothing it does can reach the host repository.
 
