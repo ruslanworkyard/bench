@@ -12,13 +12,13 @@ import {
   type Config,
 } from "../config.js";
 import { agentsOnPath } from "../detect/agents.js";
-import { baseBranch, repoRoot } from "../detect/git.js";
+import { baseBranch } from "../detect/git.js";
 import { harnessFiles } from "../detect/harness.js";
 import { testCommand } from "../detect/test-command.js";
 import type { Detection } from "../detect/types.js";
-import { CliError } from "../errors.js";
 import { copyOps, listFixtures, packagedFixturesDir } from "../fixtures.js";
 import { apply, type FileOp } from "../plan.js";
+import { requireGit, requireRepo } from "../preflight.js";
 import { formatJson, formatSummary, type FileReport, type Report } from "../print.js";
 
 export type InitOptions = {
@@ -47,14 +47,10 @@ function display(root: string, path: string): string {
 }
 
 export function init(options: InitOptions): void {
-  const root = repoRoot(options.cwd);
-  if (root === null) {
-    throw new CliError(
-      `${options.cwd} is not a git repository - run "git init" first, or cd into your repository.`,
-    );
-  }
+  requireGit();
+  const root = requireRepo(options.cwd);
 
-  // Detect.
+  // Detect. A missing base branch or agent is a warning: init must work without them.
   const harness = harnessFiles(root);
   const agents = agentsOnPath();
   const detectedAgent: Detection<string> | null =

@@ -1,0 +1,9 @@
+{
+  "baseBranch": "main",
+  "testCommand": "npm test",
+  "agent": "claude",
+  "timeoutMinutes": 20,
+  "harness": {
+    "extraPaths": []
+  }
+}

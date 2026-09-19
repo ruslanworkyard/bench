@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { init } from "./commands/init.js";
+import { run } from "./commands/run.js";
 import { CliError } from "./errors.js";
 
 const VALUE_FLAGS = new Set(["base", "test", "agent"]);
@@ -9,18 +10,19 @@ const HELP = `harnessbench - Regression tests for your CLAUDE.md.
 
 Usage:
   harnessbench init [options]
+  harnessbench run <fixture-id> [options]
 
 Options:
-  --base <branch>   Base branch to compare against (overrides detection)
-  --test <command>  Test command (overrides detection)
-  --agent <name>    Coding agent to run (overrides detection)
+  --base <branch>   Base branch to compare against (overrides config/detection)
+  --test <command>  Test command (init only; overrides detection)
+  --agent <name>    Coding agent to run (overrides config/detection)
   --dry-run         Report what init would do, without writing anything
   --json            Print the summary as one JSON object
   -h, --help        Show this help`;
 
 type Flags = Record<string, string | true>;
 
-function parse(argv: readonly string[]): { command: string | undefined; flags: Flags } {
+function parse(argv: readonly string[]): { positional: string[]; flags: Flags } {
   const flags: Flags = {};
   const positional: string[] = [];
   for (let i = 0; i < argv.length; i++) {
@@ -44,7 +46,7 @@ function parse(argv: readonly string[]): { command: string | undefined; flags: F
       positional.push(arg);
     }
   }
-  return { command: positional[0], flags };
+  return { positional, flags };
 }
 
 function value(flags: Flags, name: string): string | undefined {
@@ -55,23 +57,37 @@ function value(flags: Flags, name: string): string | undefined {
 }
 
 function main(argv: string[]): number {
-  const { command, flags } = parse(argv);
+  const { positional, flags } = parse(argv);
+  const command = positional[0];
   if (flags["help"] === true || command === undefined || command === "help") {
     console.log(HELP);
     return 0;
   }
-  if (command !== "init") {
-    throw new CliError(`unknown command "${command}"\n\n${HELP}`, 2);
+  if (command === "init") {
+    init({
+      cwd: process.cwd(),
+      base: value(flags, "base"),
+      test: value(flags, "test"),
+      agent: value(flags, "agent"),
+      dryRun: flags["dry-run"] === true,
+      json: flags["json"] === true,
+    });
+    return 0;
   }
-  init({
-    cwd: process.cwd(),
-    base: value(flags, "base"),
-    test: value(flags, "test"),
-    agent: value(flags, "agent"),
-    dryRun: flags["dry-run"] === true,
-    json: flags["json"] === true,
-  });
-  return 0;
+  if (command === "run") {
+    const fixtureId = positional[1];
+    if (fixtureId === undefined) {
+      throw new CliError(`run needs a fixture id\n\n${HELP}`, 2);
+    }
+    run({
+      cwd: process.cwd(),
+      fixtureId,
+      base: value(flags, "base"),
+      agent: value(flags, "agent"),
+    });
+    return 0;
+  }
+  throw new CliError(`unknown command "${command}"\n\n${HELP}`, 2);
 }
 
 try {

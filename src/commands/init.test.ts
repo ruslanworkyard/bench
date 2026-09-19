@@ -146,7 +146,7 @@ test("outside a git repository init fails with exit code 1", () => {
     () => run(root),
     (error: NodeJS.ErrnoException & { status?: number; stderr?: string }) => {
       assert.equal(error.status, 1);
-      assert.match(String(error.stderr), /not a git repository/);
+      assert.match(String(error.stderr), /inside a git repository/);
       return true;
     },
   );

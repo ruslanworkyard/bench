@@ -2,6 +2,7 @@ import { relative } from "node:path";
 
 import type { HarnessEntry } from "./detect/harness.js";
 import type { Detection } from "./detect/types.js";
+import type { FixtureMeta } from "./fixtures.js";
 import type { OpStatus } from "./plan.js";
 
 export type FileReport = { path: string; status: OpStatus };
@@ -89,5 +90,40 @@ export function formatSummary(report: Report): string {
 
   lines.push("");
   lines.push(`Next: ${report.next}`);
+  return lines.join("\n");
+}
+
+/** Everything `run` has established before it does any work. */
+export type RunPlan = {
+  root: string;
+  head: string;
+  baseBranch: string;
+  baseSha: string;
+  agent: string;
+  agentPath: string;
+  fixture: FixtureMeta;
+  dirtyHarness: string[];
+};
+
+export function formatRunPlan(plan: RunPlan): string {
+  const lines: string[] = [];
+  lines.push(`harnessbench run  ${plan.fixture.id}`);
+
+  lines.push("");
+  lines.push(`${"Repo".padEnd(LABEL_WIDTH)}${plan.root}`);
+  lines.push(`${"HEAD".padEnd(LABEL_WIDTH)}${plan.head}`);
+  lines.push(`${"Base branch".padEnd(LABEL_WIDTH)}${plan.baseBranch.padEnd(24)}${plan.baseSha}`);
+  lines.push(`${"Agent".padEnd(LABEL_WIDTH)}${plan.agent.padEnd(24)}${plan.agentPath}`);
+  lines.push(`${"Fixture".padEnd(LABEL_WIDTH)}${plan.fixture.id.padEnd(24)}${plan.fixture.description}`);
+
+  if (plan.dirtyHarness.length > 0) {
+    lines.push("");
+    lines.push("! these harness files have uncommitted changes; the run will use the");
+    lines.push("! committed version of each:");
+    for (const path of plan.dirtyHarness) lines.push(`!   ${path}`);
+  }
+
+  lines.push("");
+  lines.push(`Next: nothing yet - run stops after preflight; the agent is not executed.`);
   return lines.join("\n");
 }

@@ -2,9 +2,53 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { CliError } from "./errors.js";
 import type { FileOp } from "./plan.js";
 
 export type Fixture = { id: string; dir: string };
+
+/** What a fixture.json says. The whole fixture contract: a task, described. */
+export type FixtureMeta = {
+  id: string;
+  kind: string;
+  description: string;
+  tags: string[];
+};
+
+function describe(value: unknown): string {
+  if (value === null) return "null";
+  return Array.isArray(value) ? "an array" : `a ${typeof value}`;
+}
+
+/** Checks a parsed fixture.json. `where` names the file in any error. */
+export function validateFixture(value: unknown, where: string): FixtureMeta {
+  const fail = (message: string): never => {
+    throw new CliError(`${where}: ${message}`);
+  };
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    fail(`expected a JSON object, found ${describe(value)}`);
+  }
+  const raw = value as Record<string, unknown>;
+
+  const meta: FixtureMeta = { id: "", kind: "", description: "", tags: [] };
+  for (const key of ["id", "kind", "description"] as const) {
+    const field = raw[key];
+    if (typeof field !== "string" || field === "") {
+      fail(`"${key}" must be a non-empty string, found ${describe(field)}`);
+    }
+    meta[key] = field as string;
+  }
+
+  const tags = raw["tags"];
+  if (tags !== undefined) {
+    if (!Array.isArray(tags) || tags.some((tag) => typeof tag !== "string")) {
+      fail('"tags" must be an array of strings');
+    }
+    meta.tags = [...(tags as string[])];
+  }
+
+  return meta;
+}
 
 /** The fixtures/ directory shipped with the package, next to dist/. */
 export function packagedFixturesDir(): string {

@@ -5,17 +5,22 @@ import type { Detection } from "./types.js";
 const ORIGIN_HEAD = "refs/remotes/origin/HEAD";
 const ORIGIN_PREFIX = "refs/remotes/origin/";
 
-/** Runs git, returning trimmed stdout, or null if git is missing or the command fails. */
-function git(args: string[], cwd: string): string | null {
+/** Runs git, returning stdout verbatim, or null if git is missing or the command fails. */
+export function gitRaw(args: string[], cwd: string): string | null {
   try {
     return execFileSync("git", args, {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    });
   } catch {
     return null;
   }
+}
+
+/** Runs git, returning trimmed stdout, or null if git is missing or the command fails. */
+export function git(args: string[], cwd: string): string | null {
+  return gitRaw(args, cwd)?.trim() ?? null;
 }
 
 /** The work tree root containing cwd, or null when cwd is not in a git repository. */
