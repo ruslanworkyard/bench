@@ -53,7 +53,8 @@ Goal: an open-source npm package (`npx harnessbench`) people adopt. Quality over
   .harnessbench/
     config.json                         written by init, committed
     fixtures/<id>/                      fixture.json + prompt.md, committed; built-ins are copied here
-    runs/                               output of runs, gitignored
+    runs/<ts>-<fixture>-<env>/          one run, gitignored: run.json, raw.jsonl, transcript.jsonl,
+                                        diff.patch, test.log, agent.stderr.log
 ```
 The tool reads the host through git, writes only under `.harnessbench/`, and works in a temp
 worktree (`$TMPDIR/harnessbench/<run>/tree`) with an isolated `HOME` for the agent.
@@ -72,7 +73,7 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
 | `plan.ts` | the only thing that writes | build `FileOp[]`, then `apply()` |
 | `print.ts` | the only thing that formats | `format*(data): string` |
 | `agents/` | drive one external agent | `run(AgentRequest): Promise<AgentResult>` — returns every outcome, throws for none |
-| `commands/` | compose the above, in order | detect → plan → apply → print |
+| `commands/` | compose the above, in order | init: detect → plan → apply → print; run: preflight → workspace → agent → record → print |
 | `cli.ts` | argv, exit codes | nothing else |
 
 **Domain nouns** — an object that appears in several layers gets its own top-level file:
@@ -106,7 +107,8 @@ Split triggers (do not pre-empt them):
   and the judge are the next candidates for siblings of `workspace.ts`; give them a folder only
   when each has more than one file.
 - `print/init.ts` + `print/run.ts` + `print/format.ts` when a third command formats output. The
-  data shapes (`Report`, `RunPlan`) move to the file that produces them; `print.ts` keeps the
+  data shape `Report` moves to the file that produces it (`RunRecord` already lives in
+  `run-record.ts`); `print.ts` keeps the
   presentation.
 - `validate.ts` on the third hand-rolled JSON validator (`config.ts` and `fixtures.ts` each carry
   their own `describe`/`fail` today; two is not yet duplication worth an abstraction).

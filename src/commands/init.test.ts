@@ -39,6 +39,8 @@ function run(cwd: string, ...args: string[]): string {
     cwd,
     env: GIT_ENV,
     encoding: "utf8",
+    // Piped, not echoed: a test that expects a failure should not print it to the terminal.
+    stdio: ["ignore", "pipe", "pipe"],
   });
 }
 
