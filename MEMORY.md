@@ -32,6 +32,15 @@ Goal: an open-source npm package (`npx harnessbench`) people adopt. Quality over
   codebase and unnecessary enough that no codebase already has it. Not katas.
 - **Deltas, not scores.** Report one row per criterion; a composite may exist for CI gating but
   never hides rows.
+- **Agents live behind an adapter** (`AgentAdapter` in `src/agents/types.ts`): one prompt in,
+  one `AgentResult` out (outcome, telemetry, normalised transcript). An adapter never decides
+  whether a run was a success, never prints, and writes only inside the workspace it is given.
+  It returns `timeout`/`error` as outcomes; it throws only for our own bugs. Config names the
+  adapter (`agent.name`) and everything agent-specific hangs off that block.
+- **Credentials are never read, stored or printed.** They stay in the host environment;
+  preflight only checks that one of the adapter's `credentialEnv` names is set, and the
+  adapter forwards the ones on its `forwardEnv` list. The agent gets nothing else: its config
+  directory is inside the workspace, so the user's own `~/.claude` is neither read nor written.
 - **Single npm package**, TypeScript, ESM, Node >= 20, no runtime dependencies. Split later along
   interface seams if ever needed. Hand-written argv parsing until it hurts.
 - **Bin name == package name** so `npx harnessbench` works.
@@ -62,25 +71,32 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
 | `preflight.ts` | turn a `null` into a decision | `requireX(): T` — throws `CliError` carrying the fix |
 | `plan.ts` | the only thing that writes | build `FileOp[]`, then `apply()` |
 | `print.ts` | the only thing that formats | `format*(data): string` |
+| `agents/` | drive one external agent | `run(AgentRequest): Promise<AgentResult>` — returns every outcome, throws for none |
 | `commands/` | compose the above, in order | detect → plan → apply → print |
 | `cli.ts` | argv, exit codes | nothing else |
 
 **Domain nouns** — an object that appears in several layers gets its own top-level file:
-- `config.ts` — `Config` type, defaults, load/validate.
+- `config.ts` — `Config` type (including the `agent` block), defaults, load/validate. Unknown
+  keys at any level are an error naming the key: a typo is otherwise a silently ignored setting.
 - `fixtures.ts` — locate packaged fixtures via `import.meta.url`, copy into the host.
 - `workspace.ts` — a throwaway clone of the host + an isolated HOME, for one run.
 - `errors.ts` — `CliError`, the shared vocabulary at the bottom of the graph.
 
 Imports form a DAG, checked by eye: `detect/*` imports nothing internal but `detect/types.ts`;
 `plan.ts` and `errors.ts` import nothing; every arrow points down. No barrel `index.ts` files —
-the explicit paths are what make the layering legible.
+the explicit paths are what make the layering legible. `agents/index.ts` is the one exception,
+and is not a barrel: it is the registry that turns a config's `agent.name` into an adapter, and
+the only file that knows which adapters exist.
 
 What the split buys: `--dry-run` and idempotence are free because one function writes; detectors
 are testable with a temp dir and no mocks; every error message is in one file, so they are
 consistently actionable.
 
 Split triggers (do not pre-empt them):
-- `runtime/` when `workspace.ts` gets its second sibling (agent runner, harness overlay, judge).
+- `runtime/` — this one fired, as `agents/`: the agent runner is a folder because it has an
+  interface (`types.ts`), a registry (`index.ts`) and one file per agent. The harness overlay
+  and the judge are the next candidates for siblings of `workspace.ts`; give them a folder only
+  when each has more than one file.
 - `print/init.ts` + `print/run.ts` + `print/format.ts` when a third command formats output. The
   data shapes (`Report`, `RunPlan`) move to the file that produces them; `print.ts` keeps the
   presentation.
@@ -92,6 +108,10 @@ single-writer and single-formatter invariants; a `types.ts` dumping ground.
 
 Tests: `node:test`, colocated as `x.test.ts` beside `x.ts`; `npm test` → `node --test
 'dist/**/*.test.js'`, so the suite exercises the built artifact. Excluded from the package.
+Data a test needs on disk lives in `test/fixtures/` (recorded agent streams, fake agent shell
+scripts), reached from `dist/` via `import.meta.url`. Not to be confused with the top-level
+`fixtures/`, which is the benchmark tasks the package ships. **No test ever runs a real agent**:
+a fake shell script stands in, so the suite is free, offline and deterministic.
 
 ## Done
 
@@ -107,21 +127,36 @@ Tests: `node:test`, colocated as `x.test.ts` beside `x.ts`; `npm test` → `node
 - README with pitch, how it works, principles, honest status.
 - `workspace.ts`: shallow clone of the host at a ref into `$TMPDIR/harnessbench/<runId>`, origin
   removed, hooks disabled, empty HOME; `exec` in its own process group (killed as a group on
-  timeout, output streamed), `diff`, `destroy`, `withWorkspace`. ~100 ms to create on this repo.
+  timeout, output streamed, prompt on stdin), `diff`, `destroy`, `withWorkspace`. ~100 ms to
+  create on this repo.
+- `agents/`: the adapter contract, the registry, and the Claude Code adapter — `claude -p
+  --output-format stream-json --verbose --permission-mode bypassPermissions`, prompt on stdin,
+  cwd = tree, `CLAUDE_CONFIG_DIR` inside the workspace, timeout from `agent.timeoutMinutes`.
+  Raw stdout is streamed to disk and parsed line by line as it arrives (`StreamParser`), so a
+  long run is never held in memory; tool inputs and outputs are capped at 2000 chars per event.
+  Unknown event types and unparsable lines are skipped — the format grows between releases and
+  that is not a reason to fail a run.
+- Config `agent` block (`name`, `command`, `model`, `maxTurns`, `timeoutMinutes`, `args`, `env`)
+  replaced the top-level `agent` string and `timeoutMinutes`. `init` writes it in full, nulls
+  and empty arrays present, and refuses an unknown `--agent` rather than writing a config that
+  cannot run. Preflight resolves the command on PATH and checks credentials.
 
 ## Next
 
 1. Test `init --dry-run` on a real repo with a real `CLAUDE.md`; check the harness list,
    test command and base branch are right. Fix what's wrong.
-2. `run <fixture-id>`: worktree of HEAD → `claude -p --output-format stream-json` with
-   `prompt.md` on stdin, isolated HOME, timeout → capture diff → run test command → parse
-   tokens/cost/turns/tools → write `.harnessbench/runs/<ts>-<id>/` → print summary.
-   No harness overlay yet.
+2. `run <fixture-id>` end to end. The pieces exist and are tested separately; `run` still
+   stops after preflight and executes nothing. What is left is the composition: create the
+   workspace at HEAD → call the adapter with the fixture's prompt → capture the diff → run
+   the test command in the workspace → write `.harnessbench/runs/<ts>-<id>/` (raw stream,
+   diff, result JSON) → print the summary. No harness overlay yet.
 3. Harness overlay: materialise `previous` by writing base-branch versions of harness files
    (deleting ones absent there); hash the resolved harness set and print it.
 4. Judge: pairwise, blind, position-swapped, structured output; default rubrics.
 5. `compare` + markdown report; GitHub Action that comments on PRs touching harness files.
-6. More agent adapters (Codex, Aider, Gemini CLI, OpenCode, Pi).
+6. More agent adapters (Codex, Aider, Gemini CLI, OpenCode, Pi): implement `AgentAdapter` and
+   register it in `agents/index.ts`. Note `detect/agents.ts` knows more binaries than we have
+   adapters for — it reports what is on PATH; only a binary with an adapter is offered.
 
 ## Working style
 

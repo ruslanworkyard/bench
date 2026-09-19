@@ -52,13 +52,36 @@ npx harnessbench init
 
 `init` inspects the current git repository, detects your harness files (`CLAUDE.md`, `.claude/`, `AGENTS.md`, `.mcp.json` and anything they reference), your test command, your base branch and which agents are installed, then writes `.harnessbench/config.json` you can edit and copies the starter fixtures into `.harnessbench/fixtures/`. Run it with `--dry-run` first to see what it would do, or `--json` for machine-readable output.
 
+The config it writes is small and meant to be edited by hand:
+
+```json
+{
+  "baseBranch": "main",
+  "testCommand": "npm test",
+  "agent": {
+    "name": "claude-code",
+    "command": "claude",
+    "model": null,
+    "maxTurns": null,
+    "timeoutMinutes": 20,
+    "args": [],
+    "env": []
+  },
+  "harness": { "extraPaths": [] }
+}
+```
+
+`agent.name` chooses the adapter; `command` is the binary it runs (a name on `PATH` or a path), and `model`, `maxTurns` and `args` are passed through to it. A key you did not mean to set is an error naming it, rather than a setting that is silently ignored.
+
+Credentials are never stored in the config. harnessbench forwards the agent's own environment variables from your shell — `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or the Bedrock and Vertex settings — and refuses to start when none of them is set. The agent runs in a disposable clone of your repository with its own `HOME` and its own config directory, so your `~/.claude` is neither read nor written, and nothing it does can reach the original repository.
+
 Requires Node.js 20 or later and a git repository.
 
 ## Status
 
-Early. `init` works and three fixtures ship; nothing runs yet. The rough order of what comes next:
+Early. `init` works, three fixtures ship, and the Claude Code adapter is written and tested — but `run` still stops after preflight, so no agent is executed yet. The rough order of what comes next:
 
-1. `run <fixture>`: Claude Code in a worktree of the current branch, capturing diff, tests and telemetry
+1. `run <fixture>`: wire the adapter in — a disposable clone of the current branch, capturing diff, tests and telemetry
 2. Harness overlay: `previous` vs `candidate` for the same fixture
 3. Pairwise judge with default rubrics
 4. `compare`, Markdown report, and a GitHub Action that comments on PRs touching harness files
