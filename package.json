@@ -4,11 +4,21 @@
   "description": "Regression tests for your CLAUDE.md.",
   "license": "MIT",
   "type": "module",
-  "bin": { "harnessbench": "./dist/cli.js" },
-  "files": ["dist"],
-  "engines": { "node": ">=20" },
+  "bin": {
+    "harnessbench": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "fixtures",
+    "!dist/**/*.test.js"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
+    "pretest": "npm run build",
+    "test": "node --test 'dist/**/*.test.js'",
     "prepublishOnly": "npm run build"
   },
   "devDependencies": {

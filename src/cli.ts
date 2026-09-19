@@ -1,115 +1,85 @@
 #!/usr/bin/env node
-import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { init } from "./commands/init.js";
+import { CliError } from "./errors.js";
 
-const CONFIG_FILE = "harnessbench.config.json";
-
-/** Harness files we look for, in the order they are reported. */
-const HARNESS_FILES = ["CLAUDE.md", ".claude/", "AGENTS.md", ".mcp.json"] as const;
-
-type HarnessFile = (typeof HARNESS_FILES)[number];
+const VALUE_FLAGS = new Set(["base", "test", "agent"]);
+const BOOLEAN_FLAGS = new Set(["dry-run", "json", "help"]);
 
 const HELP = `harnessbench - Regression tests for your CLAUDE.md.
 
 Usage:
-  harnessbench <command> [options]
-
-Commands:
-  init          Create ${CONFIG_FILE} in the current directory
+  harnessbench init [options]
 
 Options:
-  -h, --help    Show this help
-`;
+  --base <branch>   Base branch to compare against (overrides detection)
+  --test <command>  Test command (overrides detection)
+  --agent <name>    Coding agent to run (overrides detection)
+  --dry-run         Report what init would do, without writing anything
+  --json            Print the summary as one JSON object
+  -h, --help        Show this help`;
 
-function isGitRepo(cwd: string): boolean {
-  try {
-    const out = execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    return out.trim() === "true";
-  } catch {
-    return false;
+type Flags = Record<string, string | true>;
+
+function parse(argv: readonly string[]): { command: string | undefined; flags: Flags } {
+  const flags: Flags = {};
+  const positional: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i] as string;
+    if (arg === "-h") {
+      flags["help"] = true;
+    } else if (arg.startsWith("--")) {
+      const equals = arg.indexOf("=");
+      const name = equals === -1 ? arg.slice(2) : arg.slice(2, equals);
+      if (!VALUE_FLAGS.has(name) && !BOOLEAN_FLAGS.has(name)) {
+        throw new CliError(`unknown option "${arg}"\n\n${HELP}`, 2);
+      }
+      if (equals !== -1) flags[name] = arg.slice(equals + 1);
+      else if (!VALUE_FLAGS.has(name)) flags[name] = true;
+      else {
+        const value = argv[++i];
+        if (value === undefined) throw new CliError(`option "--${name}" needs a value`, 2);
+        flags[name] = value;
+      }
+    } else {
+      positional.push(arg);
+    }
   }
+  return { command: positional[0], flags };
 }
 
-function detectHarnessFiles(cwd: string): HarnessFile[] {
-  // A trailing "/" marks a directory; existsSync accepts the path either way.
-  return HARNESS_FILES.filter((name) => existsSync(join(cwd, name)));
-}
-
-function detectTestCommand(cwd: string): string {
-  const pkgPath = join(cwd, "package.json");
-  if (!existsSync(pkgPath)) return "";
-  try {
-    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as {
-      scripts?: Record<string, string>;
-    };
-    const script = pkg.scripts?.test?.trim();
-    if (!script) return "";
-    // `npm init` seeds a placeholder that only prints an error; treat it as no test command.
-    if (/no test specified/i.test(script) && /exit 1/.test(script)) return "";
-    return "npm test";
-  } catch {
-    return "";
-  }
-}
-
-function init(cwd: string): number {
-  if (!isGitRepo(cwd)) {
-    console.error(
-      `harnessbench: ${cwd} is not a git repository.\n` +
-        `Run harnessbench from inside a git repo (or run "git init" first).`,
-    );
-    return 1;
-  }
-
-  const harnessFiles = detectHarnessFiles(cwd);
-  const testCommand = detectTestCommand(cwd);
-
-  const configPath = join(cwd, CONFIG_FILE);
-  const exists = existsSync(configPath);
-  if (!exists) {
-    const config = {
-      version: 1,
-      harnessFiles,
-      testCommand,
-      tests: [] as unknown[],
-    };
-    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-  }
-
-  console.log("Harness files:");
-  for (const name of HARNESS_FILES) {
-    console.log(`  ${harnessFiles.includes(name) ? "found  " : "missing"}  ${name}`);
-  }
-  console.log(`Test command: ${testCommand || "(none detected)"}`);
-  console.log(
-    exists
-      ? `\n${CONFIG_FILE} already exists - left unchanged.`
-      : `\nWrote ${CONFIG_FILE}.`,
-  );
-  console.log(`Next: edit ${CONFIG_FILE} to add your first test.`);
-  return 0;
+function value(flags: Flags, name: string): string | undefined {
+  const flag = flags[name];
+  if (flag === undefined) return undefined;
+  if (flag === true) throw new CliError(`option "--${name}" needs a value`, 2);
+  return flag;
 }
 
 function main(argv: string[]): number {
-  const [command] = argv;
-
-  if (command === undefined || command === "--help" || command === "-h") {
+  const { command, flags } = parse(argv);
+  if (flags["help"] === true || command === undefined || command === "help") {
     console.log(HELP);
     return 0;
   }
-
-  if (command === "init") {
-    return init(process.cwd());
+  if (command !== "init") {
+    throw new CliError(`unknown command "${command}"\n\n${HELP}`, 2);
   }
-
-  console.error(`harnessbench: unknown command "${command}"\n`);
-  console.error(HELP);
-  return 2;
+  init({
+    cwd: process.cwd(),
+    base: value(flags, "base"),
+    test: value(flags, "test"),
+    agent: value(flags, "agent"),
+    dryRun: flags["dry-run"] === true,
+    json: flags["json"] === true,
+  });
+  return 0;
 }
 
-process.exit(main(process.argv.slice(2)));
+try {
+  process.exit(main(process.argv.slice(2)));
+} catch (error) {
+  if (error instanceof CliError) {
+    console.error(`harnessbench: ${error.message}`);
+    process.exit(error.exitCode);
+  }
+  throw error;
+}

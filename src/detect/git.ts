@@ -32,9 +32,14 @@ export function baseBranch(root: string): Detection<string> | null {
     if (name !== "") return { value: name, source: "origin/HEAD" };
   }
 
+  // A repository with no commits yet still has a branch name, on an unborn HEAD.
+  const current = git(["symbolic-ref", "--quiet", "HEAD"], root);
   for (const name of ["main", "master"]) {
     if (git(["show-ref", "--verify", "--quiet", `refs/heads/${name}`], root) !== null) {
       return { value: name, source: `local branch ${name}` };
+    }
+    if (current === `refs/heads/${name}`) {
+      return { value: name, source: `current branch ${name} (no commits yet)` };
     }
   }
 
