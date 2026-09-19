@@ -4,7 +4,7 @@
   "agent": {
     "name": "claude-code",
     "command": "claude",
-    "model": null,
+    "model": "claude-sonnet-5",
     "maxTurns": null,
     "timeoutMinutes": 20,
     "args": [],

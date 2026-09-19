@@ -1,6 +1,0 @@
-{
-  "id": "holiday-api-client",
-  "kind": "feature",
-  "description": "HTTP client for a third-party public-holidays API, with mocked tests",
-  "tags": ["http", "integration"]
-}

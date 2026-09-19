@@ -1,58 +1,33 @@
-# harnessbench
+# HarnessBench
 
-Regression tests for an AI coding harness (`CLAUDE.md`, `.claude/`, `AGENTS.md`, ...). Run fixed
-engineering tasks against the same code with the old and new harness, report the deltas.
-`MEMORY.md` holds the settled decisions, the layering rules and what is done and next; read it
-before changing anything, and update it when a decision changes.
+HarnessBench regression-tests AI coding harness changes such as `CLAUDE.md`, `.claude/`, and `AGENTS.md` by running fixed engineering tasks against the same code and comparing results.
 
-## Working here
+## Project
 
-Single npm package, TypeScript, ESM, Node 20+, no runtime dependencies. Build with `npm run
-build`; `npm test` builds first and runs `node --test` against `dist/`. Do not claim something
-works until both pass. Hand-written argv parsing in `src/cli.ts`; do not add a CLI library.
+* TypeScript, ESM, Node 20+.
+* No runtime dependencies.
+* Build with `npm run build`.
+* Run tests with `npm test`.
+* Do not claim a change works unless both pass.
 
-Each file in `src/` has one relationship to the outside world. `detect/` asks questions and
-never throws or writes. `preflight.ts` turns a missing answer into a `CliError` carrying the fix.
-`plan.ts` builds `FileOp[]` and is the only writer of host files. `print.ts` is the only
-formatter. `agents/` drives one external agent behind `AgentAdapter`. `commands/` composes these
-in order. `cli.ts` owns argv and exit codes, nothing else. Domain nouns (`config.ts`,
-`fixtures.ts`, `workspace.ts`, `run-record.ts`) get their own top-level file. Imports form a DAG
-pointing down; import by explicit path, never through a barrel.
+## Engineering rules
 
-## Do
+* Preserve HarnessBench's isolation guarantees. Agents run in disposable workspaces with isolated configuration and must not modify the host repository.
+* Never read, store, log, or print credentials.
+* Tests must not invoke real coding agents. Use deterministic fixtures or fake executables.
+* Prefer simple implementations over new abstractions, dependencies, or layers unless the current change requires them.
+* Behaviour changes should be covered by tests.
+* Errors exposed to users should explain what failed and how to fix it.
 
-- Write the failing test first, then the code. Tests are `node:test` with `node:assert/strict`,
-  colocated as `x.test.ts`, named as a sentence about behaviour ("an agent that hangs is a
-  timeout, and leaves nothing behind").
-- Drive commands through the real CLI in a temp git repository. Stand a shell script from
-  `test/fixtures/` in for the agent; never run a real one in a test.
-- Make every error actionable: name the file, key or flag and what to do about it. Reject
-  unknown config keys by name rather than ignoring them.
-- Return outcomes from adapters (`completed`, `timeout`, `error`); throw only for our own bugs.
-- Comment the why, not the what: a one-line `/** */` on each export, an inline comment only where
-  a reader would otherwise ask "why this?".
-- Keep functions small and named for their role: `requireX`, `formatX`, `x(): Detection<T> | null`.
-- When you add a new module, give it exactly one exported entry point, colocate its test, and
-  add a one-line entry for it under "Code structure" in `MEMORY.md` in the same change.
-- Preserve the isolation guarantees: the agent works in a disposable clone with its own `HOME`
-  and config directory, and nothing it does can reach the host repository.
+## Existing architecture
 
-## Don't
+Respect the existing module boundaries unless the change genuinely requires altering them:
 
-- Read, store, log or print credentials. Preflight checks that a variable is set; the adapter
-  forwards a fixed list; that is all.
-- Add a field, flag, layer or abstraction that no current command needs. Split triggers are
-  listed in `MEMORY.md`; wait for them.
-- Write outside `.harnessbench/` in the host repository, or touch the harness files themselves.
-- Add runtime dependencies, feature folders, a `types.ts` dumping ground, or barrel `index.ts`
-  files (`agents/index.ts` is a registry, not a barrel).
-- Mock what a temp directory, a fake script or a recorded stream can exercise for real.
+* `cli.ts` handles arguments and exit codes.
+* `commands/` orchestrates operations.
+* `detect/` performs non-mutating detection.
+* `preflight.ts` validates prerequisites.
+* `plan.ts` owns host-side file operations.
+* `agents/` contains agent integrations behind `AgentAdapter`.
 
-## Style
-
-Two-space indent, double quotes, semicolons, trailing commas, lines wrapped at about 100
-columns. `const` by default; `for ... of` over index loops; `import type` for types; Node
-built-ins first, a blank line, then internal imports with `.js` suffixes. `strict` and
-`noUncheckedIndexedAccess` are on: narrow explicitly, no non-null assertions. Prefer plain
-functions and small literal types over classes, except where state and lifecycle are the point
-(`Workspace`, `StreamParser`). Short imperative commit messages.
+Read `MEMORY.md` for current design decisions and project status. Update it only when those documented decisions materially change.

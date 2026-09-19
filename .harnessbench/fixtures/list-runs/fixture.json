@@ -1,0 +1,6 @@
+{
+  "id": "list-runs",
+  "kind": "feature",
+  "description": "Add `harnessbench runs`: a table of past runs read from .harnessbench/runs/",
+  "tags": ["cli", "smoke"]
+}
