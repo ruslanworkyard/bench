@@ -1,7 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { CONFIG_FILE, FIXTURES_DIR, load, type Config } from "./config.js";
+import { getAdapter } from "./agents/index.js";
+import type { AgentAdapter } from "./agents/types.js";
+import { CONFIG_FILE, FIXTURES_DIR, load, type AgentConfig, type Config } from "./config.js";
 import { agentPath } from "./detect/agents.js";
 import { git, repoRoot } from "./detect/git.js";
 import { CliError } from "./errors.js";
@@ -49,15 +51,43 @@ export function requireBaseBranch(root: string, branch: string): string {
   return sha;
 }
 
-export function requireAgent(name: string): string {
+export function requireAgent(name: string): AgentAdapter {
   if (name.trim() === "") {
-    throw new CliError(`no agent set - set "agent" in ${CONFIG_FILE}, or pass --agent`, 1);
+    throw new CliError(`no agent set - set "agent.name" in ${CONFIG_FILE}, or pass --agent`, 1);
   }
-  const path = agentPath(name);
+  return getAdapter(name); // Throws CliError listing the agents that do exist.
+}
+
+/** Where the agent's binary is. `agent.command` wins; an empty one means the adapter's own. */
+export function requireAgentCommand(
+  adapter: AgentAdapter,
+  config: AgentConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const command = config.command === "" ? adapter.defaultCommand : config.command;
+  const path = agentPath(command, env);
   if (path === null) {
-    throw new CliError(`agent '${name}' not found on PATH`, 1);
+    throw new CliError(
+      `agent command '${command}' not found on PATH - install ${adapter.name}, ` +
+        `or set "agent.command" in ${CONFIG_FILE}`,
+      1,
+    );
   }
   return path;
+}
+
+/** Credentials stay in the environment: harnessbench never reads, stores or prints them. */
+export function requireCredentials(
+  adapter: AgentAdapter,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  const set = adapter.credentialEnv.some((name) => (env[name] ?? "") !== "");
+  if (!set) {
+    throw new CliError(
+      `no credentials for ${adapter.name}: set one of ${adapter.credentialEnv.join(", ")}`,
+      1,
+    );
+  }
 }
 
 export function requireFixture(root: string, id: string): LoadedFixture {

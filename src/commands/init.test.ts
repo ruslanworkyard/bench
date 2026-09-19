@@ -55,11 +55,11 @@ test("init sets up a repository, and a second run changes nothing", () => {
   const fixtureIds = listFixtures(packagedFixturesDir()).map((fixture) => fixture.id);
   assert.ok(fixtureIds.length > 0, "the package should ship fixtures");
 
-  const first = runJson(root, "--test", "npm test", "--agent", "claude");
+  const first = runJson(root, "--test", "npm test", "--agent", "claude-code");
 
   assert.deepEqual(first.harness, [{ path: "CLAUDE.md", source: "convention" }]);
   assert.deepEqual(first.testCommand, { value: "npm test", source: "--test flag" });
-  assert.deepEqual(first.agent, { value: "claude", source: "--agent flag" });
+  assert.deepEqual(first.agent, { value: "claude-code", source: "--agent flag" });
   assert.deepEqual(first.baseBranch, {
     value: "main",
     source: "current branch main (no commits yet)",
@@ -77,8 +77,15 @@ test("init sets up a repository, and a second run changes nothing", () => {
   assert.deepEqual(config, {
     baseBranch: "main",
     testCommand: "npm test",
-    agent: "claude",
-    timeoutMinutes: 20,
+    agent: {
+      name: "claude-code",
+      command: "claude",
+      model: null,
+      maxTurns: null,
+      timeoutMinutes: 20,
+      args: [],
+      env: [],
+    },
     harness: { extraPaths: [] },
   });
 
@@ -90,7 +97,7 @@ test("init sets up a repository, and a second run changes nothing", () => {
 
   assert.equal(readFileSync(join(root, ".gitignore"), "utf8"), "node_modules/\n.harnessbench/runs/\n");
 
-  const second = runJson(root, "--test", "npm test", "--agent", "claude");
+  const second = runJson(root, "--test", "npm test", "--agent", "claude-code");
 
   assert.deepEqual(second.fixtures, { added: [], present: fixtureIds });
   assert.deepEqual(second.files, [
@@ -131,12 +138,26 @@ test("a repository with nothing to detect warns instead of failing", () => {
 });
 
 test("the human summary reports what was found and what to do next", () => {
-  const output = run(repo(), "--test", "npm test", "--agent", "claude");
+  const output = run(repo(), "--test", "npm test", "--agent", "claude-code");
 
   assert.match(output, /CLAUDE\.md\s+convention/);
   assert.match(output, /Test command\s+npm test\s+--test flag/);
   assert.match(output, /Base branch\s+main\s+current branch main/);
   assert.match(output, /Next: harnessbench run/);
+});
+
+test("an unknown --agent is refused, so no config that cannot run is written", () => {
+  const root = repo();
+
+  assert.throws(
+    () => run(root, "--agent", "clod"),
+    (error: NodeJS.ErrnoException & { status?: number; stderr?: string }) => {
+      assert.equal(error.status, 1);
+      assert.match(String(error.stderr), /unknown agent 'clod' - known agents: claude-code/);
+      return true;
+    },
+  );
+  assert.ok(!existsSync(join(root, CONFIG_FILE)));
 });
 
 test("outside a git repository init fails with exit code 1", () => {
@@ -155,13 +176,13 @@ test("outside a git repository init fails with exit code 1", () => {
 test("an unusable config is reported clearly", () => {
   const root = repo();
   run(root);
-  writeFileSync(join(root, CONFIG_FILE), '{"timeoutMinutes": "soon"}', "utf8");
+  writeFileSync(join(root, CONFIG_FILE), '{"agent": {"timeoutMinutes": "soon"}}', "utf8");
 
   assert.throws(
     () => run(root),
     (error: NodeJS.ErrnoException & { status?: number; stderr?: string }) => {
       assert.equal(error.status, 1);
-      assert.match(String(error.stderr), /"timeoutMinutes" must be a positive number/);
+      assert.match(String(error.stderr), /"agent\.timeoutMinutes" must be a positive number/);
       return true;
     },
   );

@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
+import { adapterForCommand, getAdapter } from "../agents/index.js";
 import {
   CONFIG_FILE,
   FIXTURES_DIR,
@@ -42,6 +43,15 @@ function override<T extends string>(
   return detected;
 }
 
+/** The first agent on PATH that we have an adapter for; its adapter name is what config uses. */
+function detectAgent(agents: Detection<string[]> | null): Detection<string> | null {
+  for (const command of agents?.value ?? []) {
+    const adapter = adapterForCommand(command);
+    if (adapter !== null) return { value: adapter.name, source: agents?.source ?? "PATH" };
+  }
+  return null;
+}
+
 function display(root: string, path: string): string {
   return relative(root, path).split(sep).join("/");
 }
@@ -53,21 +63,24 @@ export function init(options: InitOptions): void {
   // Detect. A missing base branch or agent is a warning: init must work without them.
   const harness = harnessFiles(root);
   const agents = agentsOnPath();
-  const detectedAgent: Detection<string> | null =
-    agents === null || agents.value[0] === undefined
-      ? null
-      : { value: agents.value[0], source: agents.source };
 
   const test = override(options.test, "--test", testCommand(root));
-  const agent = override(options.agent, "--agent", detectedAgent);
+  const agent = override(options.agent, "--agent", detectAgent(agents));
   const base = override(options.base, "--base", baseBranch(root));
+
+  // An explicit --agent is checked here, so init never writes a config that cannot run.
+  const adapter = agent === null ? null : getAdapter(agent.value);
 
   const existing = load(root); // Throws CliError when a config is present but unusable.
   const config: Config = {
     ...defaults(),
     ...(base === null ? {} : { baseBranch: base.value }),
     testCommand: test?.value ?? "",
-    agent: agent?.value ?? "",
+    agent: {
+      ...defaults().agent,
+      name: adapter?.name ?? "",
+      command: adapter?.defaultCommand ?? "",
+    },
   };
 
   // Plan.
@@ -102,8 +115,8 @@ export function init(options: InitOptions): void {
   if (test === null && (existing === null || existing.testCommand === "")) {
     warnings.push(`no test command detected - set "testCommand" in ${CONFIG_FILE}`);
   }
-  if (agent === null && (existing === null || existing.agent === "")) {
-    warnings.push(`no agent found on PATH - install one, or set "agent" in ${CONFIG_FILE}`);
+  if (agent === null && (existing === null || existing.agent.name === "")) {
+    warnings.push(`no agent found on PATH - install one, or set "agent.name" in ${CONFIG_FILE}`);
   }
   if (base === null) {
     warnings.push(

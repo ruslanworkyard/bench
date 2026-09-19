@@ -2,8 +2,10 @@ import { git } from "../detect/git.js";
 import { dirtyHarnessFiles, harnessFiles } from "../detect/harness.js";
 import {
   requireAgent,
+  requireAgentCommand,
   requireBaseBranch,
   requireConfig,
+  requireCredentials,
   requireFixture,
   requireGit,
   requireRepo,
@@ -25,8 +27,10 @@ export function run(options: RunOptions): void {
 
   const baseBranch = options.base ?? config.baseBranch;
   const baseSha = requireBaseBranch(root, baseBranch);
-  const agent = options.agent ?? config.agent;
-  const agentPath = requireAgent(agent);
+  const agentConfig = { ...config.agent, name: options.agent ?? config.agent.name };
+  const adapter = requireAgent(agentConfig.name);
+  const agentPath = requireAgentCommand(adapter, agentConfig);
+  requireCredentials(adapter);
   const { fixture } = requireFixture(root, options.fixtureId);
 
   const harness = [
@@ -43,7 +47,7 @@ export function run(options: RunOptions): void {
     head: git(["rev-parse", "HEAD"], root) ?? "",
     baseBranch,
     baseSha,
-    agent,
+    agent: adapter.name,
     agentPath,
     fixture,
     dirtyHarness: dirty,

@@ -16,19 +16,21 @@ function tempDir(prefix: string): string {
   return dir;
 }
 
-/** A PATH with one fake agent executable on it, so requireAgent can resolve. */
-const AGENT = "fake-agent";
+/** A PATH with a fake `claude` on it, so the agent's command resolves without installing one. */
+const AGENT = "claude-code";
 const AGENT_BIN = (() => {
   const bin = tempDir("harnessbench-bin-");
-  const path = join(bin, AGENT);
+  const path = join(bin, "claude");
   writeFileSync(path, "#!/bin/sh\nexit 0\n", "utf8");
   chmodSync(path, 0o755);
   return bin;
 })();
 
-const ENV = {
+const ENV: NodeJS.ProcessEnv = {
   ...process.env,
   PATH: `${AGENT_BIN}${delimiter}${process.env["PATH"] ?? ""}`,
+  // Credentials the agent would use; preflight only checks that one of them is set.
+  ANTHROPIC_API_KEY: "test-key",
   GIT_CONFIG_GLOBAL: "/dev/null",
   GIT_CONFIG_SYSTEM: "/dev/null",
   GIT_AUTHOR_NAME: "harnessbench",
@@ -37,12 +39,30 @@ const ENV = {
   GIT_COMMITTER_EMAIL: "harnessbench@example.com",
 };
 
+/** The same environment with nothing that could authenticate an agent. */
+function withoutCredentials(): NodeJS.ProcessEnv {
+  const env = { ...ENV };
+  for (const name of [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+  ]) {
+    delete env[name];
+  }
+  return env;
+}
+
 function git(root: string, ...args: string[]): void {
   execFileSync("git", args, { cwd: root, env: ENV, stdio: "ignore" });
 }
 
 function cli(cwd: string, ...args: string[]): string {
-  return execFileSync(process.execPath, [CLI, ...args], { cwd, env: ENV, encoding: "utf8" });
+  return run(ENV, cwd, ...args);
+}
+
+function run(env: NodeJS.ProcessEnv, cwd: string, ...args: string[]): string {
+  return execFileSync(process.execPath, [CLI, ...args], { cwd, env, encoding: "utf8" });
 }
 
 /** An initialised repository with one commit, ready to run. */
@@ -57,8 +77,16 @@ function repo(): string {
 }
 
 function fails(cwd: string, ...args: string[]): { status: number; stderr: string } {
+  return failsWith(ENV, cwd, ...args);
+}
+
+function failsWith(
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  ...args: string[]
+): { status: number; stderr: string } {
   try {
-    cli(cwd, ...args);
+    run(env, cwd, ...args);
   } catch (error) {
     const failure = error as NodeJS.ErrnoException & { status?: number; stderr?: string };
     return { status: failure.status ?? 0, stderr: String(failure.stderr) };
@@ -79,7 +107,7 @@ test("run prints the plan for a fixture", () => {
   assert.match(output, new RegExp(`Repo\\s+${root}`));
   assert.match(output, /HEAD\s+[0-9a-f]{40}/);
   assert.match(output, /Base branch\s+main\s+[0-9a-f]{40}/);
-  assert.match(output, new RegExp(`Agent\\s+${AGENT}\\s+${join(AGENT_BIN, AGENT)}`));
+  assert.match(output, new RegExp(`Agent\\s+${AGENT}\\s+${join(AGENT_BIN, "claude")}`));
   assert.match(output, /Fixture\s+ttl-cache\s+\S/);
   assert.doesNotMatch(output, /uncommitted changes/);
 });
@@ -120,6 +148,21 @@ test("run with a missing base branch names it", () => {
 
   assert.equal(status, 1);
   assert.match(stderr, /base branch 'release\/4\.2' not found/);
+});
+
+test("run with an unknown agent lists the ones harnessbench can drive", () => {
+  const { status, stderr } = fails(repo(), "run", "ttl-cache", "--agent", "clod");
+
+  assert.equal(status, 1);
+  assert.match(stderr, /unknown agent 'clod'/);
+  assert.match(stderr, /known agents: claude-code/);
+});
+
+test("run without credentials says which variables would do", () => {
+  const { status, stderr } = failsWith(withoutCredentials(), repo(), "run", "ttl-cache");
+
+  assert.equal(status, 1);
+  assert.match(stderr, /no credentials for claude-code: set one of ANTHROPIC_API_KEY/);
 });
 
 test("run needs a fixture id", () => {

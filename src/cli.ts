@@ -15,7 +15,7 @@ Usage:
 Options:
   --base <branch>   Base branch to compare against (overrides config/detection)
   --test <command>  Test command (init only; overrides detection)
-  --agent <name>    Coding agent to run (overrides config/detection)
+  --agent <name>    Agent to drive, by adapter name (overrides config/detection)
   --dry-run         Report what init would do, without writing anything
   --json            Print the summary as one JSON object
   -h, --help        Show this help`;

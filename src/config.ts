@@ -12,20 +12,52 @@ export const CONFIG_FILE = `${STATE_DIR}/config.json`;
 export const DEFAULT_BASE_BRANCH = "main";
 export const DEFAULT_TIMEOUT_MINUTES = 20;
 
+/** How one agent is driven. `name` picks the adapter; the rest is that adapter's business. */
+export type AgentConfig = {
+  name: string;
+  /** Binary or path. Empty means the adapter's own default command. */
+  command: string;
+  model: string | null;
+  maxTurns: number | null;
+  timeoutMinutes: number;
+  /** Appended verbatim after the arguments the adapter builds. */
+  args: string[];
+  /** Extra host environment variable NAMES to forward, on top of the adapter's own. */
+  env: string[];
+};
+
 export type Config = {
   baseBranch: string;
   testCommand: string;
-  agent: string;
-  timeoutMinutes: number;
+  agent: AgentConfig;
   harness: { extraPaths: string[] };
 };
+
+const TOP_KEYS = ["baseBranch", "testCommand", "agent", "harness"] as const;
+const AGENT_KEYS = [
+  "name",
+  "command",
+  "model",
+  "maxTurns",
+  "timeoutMinutes",
+  "args",
+  "env",
+] as const;
+const HARNESS_KEYS = ["extraPaths"] as const;
 
 export function defaults(): Config {
   return {
     baseBranch: DEFAULT_BASE_BRANCH,
     testCommand: "",
-    agent: "",
-    timeoutMinutes: DEFAULT_TIMEOUT_MINUTES,
+    agent: {
+      name: "",
+      command: "",
+      model: null,
+      maxTurns: null,
+      timeoutMinutes: DEFAULT_TIMEOUT_MINUTES,
+      args: [],
+      env: [],
+    },
     harness: { extraPaths: [] },
   };
 }
@@ -43,42 +75,102 @@ function describe(value: unknown): string {
   return Array.isArray(value) ? "an array" : `a ${typeof value}`;
 }
 
+/** Every key has to be one we know; a typo is a silently ignored setting otherwise. */
+function checkKeys(raw: Record<string, unknown>, known: readonly string[], prefix: string): void {
+  for (const key of Object.keys(raw)) {
+    if (!known.includes(key)) fail(`unknown key "${prefix}${key}"`);
+  }
+}
+
+function object(value: unknown, where: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    fail(`${where} must be an object, found ${describe(value)}`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function stringField(raw: Record<string, unknown>, key: string, where: string): string | undefined {
+  const field = raw[key];
+  if (field === undefined) return undefined;
+  if (typeof field !== "string") fail(`${where} must be a string, found ${describe(field)}`);
+  return field;
+}
+
+/** A setting the agent leaves to the tool it drives: a value, or null for "unset". */
+function nullableString(
+  raw: Record<string, unknown>,
+  key: string,
+  where: string,
+): string | null | undefined {
+  const field = raw[key];
+  if (field === undefined) return undefined;
+  if (field === null) return null;
+  if (typeof field !== "string") fail(`${where} must be a string or null, found ${describe(field)}`);
+  return field;
+}
+
+function positiveNumber(raw: Record<string, unknown>, key: string, where: string): number | undefined {
+  const field = raw[key];
+  if (field === undefined) return undefined;
+  if (typeof field !== "number" || !Number.isFinite(field) || field <= 0) {
+    fail(`${where} must be a positive number, found ${describe(field)}`);
+  }
+  return field;
+}
+
+function stringArray(raw: Record<string, unknown>, key: string, where: string): string[] | undefined {
+  const field = raw[key];
+  if (field === undefined) return undefined;
+  if (!Array.isArray(field) || field.some((entry) => typeof entry !== "string")) {
+    fail(`${where} must be an array of strings`);
+  }
+  return [...(field as string[])];
+}
+
+function validateAgent(value: unknown, agent: AgentConfig): void {
+  const raw = object(value, '"agent"');
+  checkKeys(raw, AGENT_KEYS, "agent.");
+
+  agent.name = stringField(raw, "name", '"agent.name"') ?? agent.name;
+  agent.command = stringField(raw, "command", '"agent.command"') ?? agent.command;
+
+  const model = nullableString(raw, "model", '"agent.model"');
+  if (model !== undefined) agent.model = model;
+
+  const maxTurns = raw["maxTurns"];
+  if (maxTurns !== undefined) {
+    if (maxTurns === null) agent.maxTurns = null;
+    else if (typeof maxTurns !== "number" || !Number.isInteger(maxTurns) || maxTurns <= 0) {
+      fail(`"agent.maxTurns" must be a positive integer or null, found ${describe(maxTurns)}`);
+    } else agent.maxTurns = maxTurns;
+  }
+
+  agent.timeoutMinutes =
+    positiveNumber(raw, "timeoutMinutes", '"agent.timeoutMinutes"') ?? agent.timeoutMinutes;
+  agent.args = stringArray(raw, "args", '"agent.args"') ?? agent.args;
+  agent.env = stringArray(raw, "env", '"agent.env"') ?? agent.env;
+}
+
 /** Checks a parsed config, filling in defaults for anything absent. */
 export function validate(value: unknown): Config {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     fail(`expected a JSON object, found ${describe(value)}`);
   }
   const raw = value as Record<string, unknown>;
+  checkKeys(raw, TOP_KEYS, "");
   const config = defaults();
 
-  for (const key of ["baseBranch", "testCommand", "agent"] as const) {
-    const field = raw[key];
-    if (field === undefined) continue;
-    if (typeof field !== "string") fail(`"${key}" must be a string, found ${describe(field)}`);
-    config[key] = field;
-  }
+  config.baseBranch = stringField(raw, "baseBranch", '"baseBranch"') ?? config.baseBranch;
+  config.testCommand = stringField(raw, "testCommand", '"testCommand"') ?? config.testCommand;
   if (config.baseBranch.trim() === "") fail('"baseBranch" must not be empty');
 
-  const timeout = raw["timeoutMinutes"];
-  if (timeout !== undefined) {
-    if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) {
-      fail(`"timeoutMinutes" must be a positive number, found ${describe(timeout)}`);
-    }
-    config.timeoutMinutes = timeout;
-  }
+  if (raw["agent"] !== undefined) validateAgent(raw["agent"], config.agent);
 
-  const harness = raw["harness"];
-  if (harness !== undefined) {
-    if (typeof harness !== "object" || harness === null || Array.isArray(harness)) {
-      fail(`"harness" must be an object, found ${describe(harness)}`);
-    }
-    const extraPaths = (harness as Record<string, unknown>)["extraPaths"];
-    if (extraPaths !== undefined) {
-      if (!Array.isArray(extraPaths) || extraPaths.some((path) => typeof path !== "string")) {
-        fail('"harness.extraPaths" must be an array of strings');
-      }
-      config.harness.extraPaths = [...(extraPaths as string[])];
-    }
+  if (raw["harness"] !== undefined) {
+    const harness = object(raw["harness"], '"harness"');
+    checkKeys(harness, HARNESS_KEYS, "harness.");
+    config.harness.extraPaths =
+      stringArray(harness, "extraPaths", '"harness.extraPaths"') ?? config.harness.extraPaths;
   }
 
   return config;

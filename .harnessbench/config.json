@@ -1,8 +1,15 @@
 {
   "baseBranch": "main",
   "testCommand": "npm test",
-  "agent": "claude",
-  "timeoutMinutes": 20,
+  "agent": {
+    "name": "claude-code",
+    "command": "claude",
+    "model": null,
+    "maxTurns": null,
+    "timeoutMinutes": 20,
+    "args": [],
+    "env": []
+  },
   "harness": {
     "extraPaths": []
   }

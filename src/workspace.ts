@@ -25,6 +25,8 @@ export type WorkspaceOptions = {
 export type ExecOptions = {
   /** Added to the fixed, minimal environment; nothing else from the host is visible. */
   env?: Record<string, string>;
+  /** Written to the command's stdin. Absent means an immediately closed, empty stdin. */
+  stdin?: string;
   timeoutMs?: number;
   onStdout?: (chunk: string) => void;
   onStderr?: (chunk: string) => void;
@@ -60,8 +62,12 @@ export class Workspace {
         env: { ...runEnv(this.home), ...options.env },
         // Its own process group, so a timeout can take the whole tree of children with it.
         detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
       });
+
+      // A command that exits without reading its input is its own business, not an error.
+      child.stdin.on("error", () => {});
+      child.stdin.end(options.stdin ?? "");
 
       let timedOut = false;
       let timer: NodeJS.Timeout | undefined;

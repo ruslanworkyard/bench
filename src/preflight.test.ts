@@ -1,15 +1,19 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import { CONFIG_FILE, FIXTURES_DIR, STATE_DIR } from "./config.js";
+import { claudeCode } from "./agents/claude-code.js";
+import { CONFIG_FILE, FIXTURES_DIR, STATE_DIR, defaults } from "./config.js";
 import { CliError } from "./errors.js";
 import {
+  requireAgent,
+  requireAgentCommand,
   requireBaseBranch,
   requireConfig,
+  requireCredentials,
   requireFixture,
   requireGit,
   requireRepo,
@@ -110,15 +114,54 @@ test("requireConfig reports malformed JSON", () => {
 test("requireConfig returns the config, defaults filled in", () => {
   const root = repo();
   mkdirSync(join(root, STATE_DIR), { recursive: true });
-  write(root, CONFIG_FILE, '{"baseBranch": "trunk", "agent": "claude"}');
+  write(root, CONFIG_FILE, '{"baseBranch": "trunk", "agent": {"name": "claude-code"}}');
 
   assert.deepEqual(requireConfig(root), {
+    ...defaults(),
     baseBranch: "trunk",
-    testCommand: "",
-    agent: "claude",
-    timeoutMinutes: 20,
-    harness: { extraPaths: [] },
+    agent: { ...defaults().agent, name: "claude-code" },
   });
+});
+
+test("requireAgent resolves an adapter, and lists them when the name is not one", () => {
+  assert.equal(requireAgent("claude-code"), claudeCode);
+
+  cliError(() => requireAgent(""), /no agent set - set "agent\.name"/);
+  const error = cliError(() => requireAgent("clod"), /unknown agent 'clod'/);
+  assert.match(error.message, /known agents: claude-code/);
+});
+
+test("requireAgentCommand prefers the configured command over the adapter's own", () => {
+  const bin = tempDir();
+  for (const name of ["claude", "claude-next"]) {
+    const path = join(bin, name);
+    writeFileSync(path, "#!/bin/sh\nexit 0\n", "utf8");
+    chmodSync(path, 0o755);
+  }
+  const env = { PATH: bin };
+  const agent = defaults().agent;
+
+  assert.equal(requireAgentCommand(claudeCode, agent, env), join(bin, "claude"));
+  assert.equal(
+    requireAgentCommand(claudeCode, { ...agent, command: "claude-next" }, env),
+    join(bin, "claude-next"),
+  );
+
+  const error = cliError(
+    () => requireAgentCommand(claudeCode, { ...agent, command: "nowhere" }, env),
+    /agent command 'nowhere' not found on PATH/,
+  );
+  assert.match(error.message, /"agent\.command"/);
+});
+
+test("requireCredentials accepts any one of the agent's variables, and names them all", () => {
+  assert.doesNotThrow(() => requireCredentials(claudeCode, { ANTHROPIC_AUTH_TOKEN: "t" }));
+
+  const error = cliError(
+    () => requireCredentials(claudeCode, { ANTHROPIC_API_KEY: "" }),
+    /no credentials for claude-code: set one of/,
+  );
+  for (const name of claudeCode.credentialEnv) assert.match(error.message, new RegExp(name));
 });
 
 test("requireBaseBranch resolves an existing branch to a sha", () => {
