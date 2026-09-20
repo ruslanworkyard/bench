@@ -16,8 +16,6 @@ HarnessBench regression-tests AI coding harness changes such as `CLAUDE.md`, `.c
   Send reconnaissance to a sub-agent (the `Explore` agent, preferably Haiku): "which files implement X,
   and what conventions do they follow?" Read on the main thread only the files you are about to
   change and the one or two they are modelled on.
-* Start from the module map below and `MEMORY.md`; they say which file owns what, so most
-  questions are answered before any file is opened.
 * Build and test once the change is written, not after every edit. Read the failure, fix the
   cause, re-run.
 
@@ -40,5 +38,3 @@ Respect the existing module boundaries unless the change genuinely requires alte
 * `preflight.ts` validates prerequisites.
 * `plan.ts` owns host-side file operations.
 * `agents/` contains agent integrations behind `AgentAdapter`.
-
-Read `MEMORY.md` for current design decisions and project status. Update it only when those documented decisions materially change.
