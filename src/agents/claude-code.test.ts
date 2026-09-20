@@ -221,6 +221,33 @@ test("an agent that hangs is a timeout, and leaves nothing behind", async () => 
   ]);
 });
 
+test("an agent that hit its turn limit is max_turns, not an error, despite exiting non-zero", async () => {
+  const ws = await workspace();
+  const scratch = tempDir("harnessbench-agent-out-");
+
+  const result = await claudeCode.run({
+    workspace: ws,
+    prompt: "Go.\n",
+    rawOutputPath: join(scratch, "raw.jsonl"),
+    stderrPath: join(scratch, "agent.stderr.log"),
+    config: config({ command: fixture("max-turns-claude.sh"), maxTurns: 40 }),
+  });
+
+  assert.equal(result.outcome, "max_turns");
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.turns, 40);
+  assert.equal(result.finalMessage, "cut off by the turn limit after 40 turns");
+  assert.equal(result.costUsd, 1.25);
+  // The agent's error event is the one in the transcript; the adapter adds none of its own.
+  const errors = result.transcript.filter((e) => e.type === "error");
+  assert.deepEqual(
+    errors.map((e) => e.type === "error" && e.message),
+    ["cut off by the turn limit after 40 turns"],
+  );
+  const last = result.transcript.filter((e) => e.type === "assistant").at(-1);
+  assert.equal(last?.type === "assistant" && last.text, "Now let's make the memory edits.");
+});
+
 test("an agent that exits non-zero is an error, explained by its stderr", async () => {
   const ws = await workspace();
   const scratch = tempDir("harnessbench-agent-out-");

@@ -32,9 +32,10 @@ Options:
   --json            Print the summary as one JSON document
   -h, --help        Show this help
 
-Exit codes (run): 0 completed, 2 agent timed out, 3 agent error, 1 anything else; the
-worse of the two sides wins. A failing test suite is a result, not an error: it does not
-change the exit code. compare exits 0 after printing: it reports, it does not gate.`;
+Exit codes (run): 0 completed, 2 agent timed out, 3 agent error, 4 agent hit the turn
+limit, 1 anything else; the worse of the two sides wins. A failing test suite is a result,
+not an error: it does not change the exit code. compare exits 0 after printing: it reports,
+it does not gate.`;
 
 type Flags = Record<string, string | true>;
 
@@ -83,7 +84,7 @@ function positiveInteger(flags: Flags, name: string): number | undefined {
 }
 
 /** What the shell learns from a run: the agent's outcome, never the test suite's. */
-const RUN_EXIT_CODES = { completed: 0, timeout: 2, error: 3 } as const;
+const RUN_EXIT_CODES = { completed: 0, timeout: 2, error: 3, max_turns: 4 } as const;
 
 async function main(argv: string[]): Promise<number> {
   const { positional, flags } = parse(argv);

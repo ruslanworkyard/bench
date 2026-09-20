@@ -151,16 +151,40 @@ test("a run killed before its result event reports what it managed to say", () =
 
 test("a failed result is carried as an error event", () => {
   const parsed = parseStreamJson([
-    '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":40,' +
-      '"duration_ms":900,"result":"Reached the turn limit.","usage":{"input_tokens":3}}',
+    '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":4,' +
+      '"duration_ms":900,"result":"The API rejected the request.","usage":{"input_tokens":3}}',
   ]);
 
   assert.equal(parsed.isError, true);
-  assert.equal(parsed.finalMessage, "Reached the turn limit.");
+  assert.equal(parsed.resultSubtype, "error_during_execution");
+  assert.equal(parsed.finalMessage, "The API rejected the request.");
   assert.equal(parsed.costUsd, null);
   assert.deepEqual(parsed.transcript, [
-    { thread: "main", at: 0, type: "error", message: "Reached the turn limit." },
+    { thread: "main", at: 0, type: "error", message: "The API rejected the request." },
   ]);
+});
+
+test("a run cut off by the turn limit says so, instead of the half-sentence it stopped on", () => {
+  const parsed = parseStreamJson([
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"Now let\'s make the memory edits."}]}}',
+    '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":40,"duration_ms":900,' +
+      '"usage":{"input_tokens":3}}',
+  ]);
+
+  assert.equal(parsed.resultSubtype, "error_max_turns");
+  assert.equal(parsed.isError, true);
+  assert.equal(parsed.turns, 40);
+  assert.equal(parsed.finalMessage, "cut off by the turn limit after 40 turns");
+  // The agent's own words stay in the transcript; only the run's final message is replaced.
+  assert.deepEqual(parsed.transcript, [
+    { thread: "main", at: 0, type: "assistant", text: "Now let's make the memory edits.", model: null, usage: null },
+    { thread: "main", at: 0, type: "error", message: "cut off by the turn limit after 40 turns" },
+  ]);
+});
+
+test("a stream without a result event has no result subtype", () => {
+  assert.equal(parseStreamJson(recorded("claude-stream-no-result.jsonl")).resultSubtype, null);
+  assert.equal(parseStreamJson(recorded("claude-stream.jsonl")).resultSubtype, "success");
 });
 
 test("garbage, blank lines and unknown event types are skipped", () => {

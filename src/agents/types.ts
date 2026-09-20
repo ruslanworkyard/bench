@@ -1,4 +1,5 @@
 import type { AgentConfig } from "../config.js";
+import type { RunOutcome } from "../run-record.js";
 import type { Workspace } from "../workspace.js";
 
 /**
@@ -20,7 +21,7 @@ export type AgentRequest = {
 export type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number };
 
 export type AgentResult = {
-  outcome: "completed" | "timeout" | "error";
+  outcome: RunOutcome;
   /** Null when the agent was killed by a signal, including on timeout. */
   exitCode: number | null;
   /** What actually ran, as the agent itself reported it; null when it did not. */

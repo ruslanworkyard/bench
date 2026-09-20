@@ -73,6 +73,14 @@ test("a run record round-trips through run.json", () => {
   assert.deepEqual(readRunRecord(dir), written);
 });
 
+test("readRunRecord reads every outcome, including the three written before max_turns existed", () => {
+  for (const outcome of ["completed", "timeout", "error", "max_turns"] as const) {
+    const dir = tempDir();
+    writeFileSync(join(dir, "run.json"), JSON.stringify({ ...record(), outcome }), "utf8");
+    assert.equal(readRunRecord(dir).outcome, outcome);
+  }
+});
+
 test("readRunRecord still reads a record written before telemetry existed", () => {
   const dir = tempDir();
   const { telemetry, ...earlier } = record();

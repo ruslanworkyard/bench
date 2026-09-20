@@ -392,6 +392,27 @@ test("an agent that cannot start is an error: exit 3, explained by its stderr", 
   assert.match(stdout, /claude: invalid API key/);
 });
 
+test("an agent that hits the turn limit is max_turns: exit 4, and compare says so", () => {
+  const root = repoWithFake("max-turns-claude.sh");
+
+  const { status, stdout } = cli(root, "run", "ttl-cache");
+
+  assert.equal(status, 4);
+  for (const dir of Object.values(runDirs(root))) {
+    const record = readRunRecord(dir);
+    assert.equal(record.outcome, "max_turns");
+    assert.equal(record.exitCode, 1);
+    assert.equal(record.turns, 40);
+    assert.equal(record.finalMessage, "cut off by the turn limit after 40 turns");
+  }
+  assert.match(stdout, /previous {2}→ max_turns after /);
+  assert.match(stdout, /candidate {2}→ max_turns after /);
+  assert.match(stdout, /Final message: cut off by the turn limit after 40 turns/);
+  assert.doesNotMatch(stdout, /Agent stderr/); // Only an error shows the stderr tail.
+  assert.match(stdout, /warning: previous hit the turn limit \(40 turns\); its effort rows are not comparable/);
+  assert.match(stdout, /warning: candidate hit the turn limit \(40 turns\); its effort rows are not comparable/);
+});
+
 test("--keep leaves the workspace behind and says where; without it the workspace is gone", () => {
   const kept = repoWithFake("fake-claude.sh");
   const { stderr } = ok(kept, "run", "ttl-cache", "--keep");

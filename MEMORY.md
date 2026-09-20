@@ -35,7 +35,7 @@ Goal: an open-source npm package (`npx harnessbench`) people adopt. Quality over
 - **Agents live behind an adapter** (`AgentAdapter` in `src/agents/types.ts`): one prompt in,
   one `AgentResult` out (outcome, telemetry, normalised transcript). An adapter never decides
   whether a run was a success, never prints, and writes only inside the workspace it is given.
-  It returns `timeout`/`error` as outcomes; it throws only for our own bugs. Config names the
+  It returns `max_turns`/`timeout`/`error` as outcomes; it throws only for our own bugs. Config names the
   adapter (`agent.name`) and everything agent-specific hangs off that block.
 - **Credentials are never read, stored or printed.** They stay in the host environment;
   preflight only checks that one of the adapter's `credentialEnv` names is set, and the
@@ -187,7 +187,7 @@ a fake shell script stands in, so the suite is free, offline and deterministic.
   `<YYYYMMDD-HHMMSS UTC>-<fixture>-candidate`; the environment is fixed to `candidate` until the
   overlay exists, and the name already carries it. The run dir is created before the agent
   starts so a crash still leaves `raw.jsonl`. Exit codes: 0 completed, 2 timeout, 3 agent
-  error, 1 preflight; a failing test suite is a result, not an exit code. Flags `--keep`,
+  error, 4 max_turns, 1 preflight; a failing test suite is a result, not an exit code. Flags `--keep`,
   `--json`, `--max-turns`, `--model`. The adapter contract gained `stderrPath` (agent stderr
   streamed whole to `agent.stderr.log`; the summary shows its last 5 lines on an error).
   `agent.command` may now be a path, taken as it is; only a bare name is looked up on PATH.
@@ -246,8 +246,24 @@ a fake shell script stands in, so the suite is free, offline and deterministic.
   sub-agent and one at the end). `formatRun` gained `Threads` and `Phases` lines.
   `test/fixtures/claude-stream-subagent.jsonl` is the fake stream with a sub-agent, per-
   message usage and two results. Schema stays 2. Not built: classifying shell commands,
-  a `max_turns` outcome, deduplicating an assistant message the stream splits across
+  deduplicating an assistant message the stream splits across
   several `assistant` events (each counts as a turn and carries the same usage, as today).
+
+- `max_turns` outcome (2026-09-20). `RunOutcome` (`run-record.ts`, imported by
+  `AgentResult`) is `completed | max_turns | timeout | error`. A run that hits the turn cap
+  is not a crash: `compare` must tell budget from breakage, and a judge must never be handed
+  a cut-off run as finished (three of the first six real runs were cut-offs). The Claude Code
+  parser records the result event's `subtype` as `resultSubtype` (null without a result);
+  the adapter maps, in order: timed out → `timeout`; subtype `error_max_turns` →
+  `max_turns`; non-zero exit or `is_error` → `error`; else `completed`. The subtype check
+  comes first because Claude Code exits non-zero on `error_max_turns`. Only `agents/` knows
+  that string. For `max_turns`, `finalMessage` and the parser's `error` event both read
+  `cut off by the turn limit after N turns`; the agent's trailing half-sentence stays in the
+  transcript only. Exit code 4. The summary reads `max_turns after 8m24s`; the stderr tail
+  is still shown only for `error`. `compare` warns `<side> hit the turn limit (41 turns);
+  its effort rows are not comparable` and keeps the `n/a` effort rows; the outcome row's
+  classification is unchanged (completed is best). Old records with the three earlier
+  outcomes still read; schema stays 2. `test/fixtures/max-turns-claude.sh` is the fake.
 
 ## Next
 

@@ -21,7 +21,17 @@ export type ParsedStream = {
   transcript: TranscriptEvent[];
   /** The agent's own verdict from the result event; false when there was none. */
   isError: boolean;
+  /** The result event's `subtype` ("success", "error_max_turns", ...); null when there was none. */
+  resultSubtype: string | null;
 };
+
+/** The result subtype Claude Code reports when `--max-turns` cut the run off. */
+export const MAX_TURNS_SUBTYPE = "error_max_turns";
+
+/** What a cut-off run says instead of the half-sentence it was in the middle of. */
+export function cutOffMessage(turns: number): string {
+  return `cut off by the turn limit after ${turns} turns`;
+}
 
 export type StreamOptions = {
   /** The workspace tree; a tool's `file_path` under it is recorded relative to it. */
@@ -138,6 +148,7 @@ export class StreamParser {
     toolFailures: 0,
     transcript: [],
     isError: false,
+    resultSubtype: null,
   };
 
   private readonly tree: string | undefined;
@@ -246,18 +257,20 @@ export class StreamParser {
     this.parsed.costUsd = num(event["total_cost_usd"]);
     this.parsed.durationMs = num(event["duration_ms"]);
     this.parsed.turns = num(event["num_turns"]) ?? this.assistantMessages;
+    this.parsed.resultSubtype = str(event["subtype"]);
 
-    const final = str(event["result"]);
+    // A cut-off run's trailing text is whatever it was in the middle of, not a summary.
+    const final =
+      this.parsed.resultSubtype === MAX_TURNS_SUBTYPE ? cutOffMessage(this.parsed.turns) : str(event["result"]);
     if (final !== null) this.parsed.finalMessage = final;
 
     this.parsed.isError = event["is_error"] === true;
     if (this.parsed.isError) {
-      const subtype = str(event["subtype"]) ?? "error";
       this.parsed.transcript.push({
         thread: MAIN_THREAD,
         at,
         type: "error",
-        message: truncate(final !== null && final !== "" ? final : subtype),
+        message: truncate(final !== null && final !== "" ? final : (this.parsed.resultSubtype ?? "error")),
       });
     }
   }

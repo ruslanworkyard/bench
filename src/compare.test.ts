@@ -289,6 +289,23 @@ test("a side that did not complete makes every effort row n/a and warns", () => 
   assert.equal(both.warnings.length, 2);
 });
 
+test("a side cut off by the turn limit warns with the turn count, and its effort rows are n/a", () => {
+  const c = pair({}, { outcome: "max_turns", exitCode: 1, turns: 41 });
+
+  assert.deepEqual(c.warnings, [
+    "candidate hit the turn limit (41 turns); its effort rows are not comparable",
+  ]);
+  const outcome = row(c.rows, "outcome");
+  assert.equal(outcome.candidate, "max_turns");
+  assert.equal(outcome.classification, "regressed");
+  for (const id of ROW_IDS.slice(ROW_IDS.indexOf("turns"))) {
+    const r = row(c.rows, id);
+    assert.equal(r.classification, "n/a", id);
+    assert.equal(r.note, "candidate did not complete", id);
+  }
+  assert.equal(row(c.rows, "turns").candidate, "41");
+});
+
 test("warns when the models differ", () => {
   assert.deepEqual(pair({ agent: { name: "claude-code", command: "claude", model: "claude-opus-5" } }).warnings, [
     "models differ: previous claude-opus-5, candidate claude-sonnet-4-5",

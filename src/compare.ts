@@ -245,9 +245,11 @@ export function compare(previous: RunRecord, candidate: RunRecord): Comparison {
   ] as const) {
     if (record.outcome !== "completed") {
       incomplete.push(side);
-      warnings.push(
-        `${side} did not complete (${record.outcome}); its effort rows are not comparable`,
-      );
+      const what =
+        record.outcome === "max_turns"
+          ? `hit the turn limit (${formatCount(record.turns)} turns)`
+          : `did not complete (${record.outcome})`;
+      warnings.push(`${side} ${what}; its effort rows are not comparable`);
     }
   }
   if (previous.agent.model !== candidate.agent.model) {

@@ -14,7 +14,11 @@ import type { Telemetry } from "./telemetry.js";
 export const RUN_RECORD_SCHEMA = 2;
 export const RUN_RECORD_FILE = "run.json";
 
-export type RunOutcome = "completed" | "timeout" | "error";
+/**
+ * How the agent's run ended. `max_turns` is a run cut off by the turn limit: not finished,
+ * not broken either, so compare and the judge must never read it as either.
+ */
+export type RunOutcome = "completed" | "max_turns" | "timeout" | "error";
 
 /**
  * The two harnesses a fixture runs under, on the same code: `previous` is the harness at the

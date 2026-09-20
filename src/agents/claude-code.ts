@@ -2,7 +2,7 @@ import { createWriteStream, existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { StreamParser } from "./claude-code-stream.js";
+import { MAX_TURNS_SUBTYPE, StreamParser } from "./claude-code-stream.js";
 import { MAIN_THREAD, type AgentAdapter, type AgentRequest, type AgentResult } from "./types.js";
 
 const DEFAULT_COMMAND = "claude";
@@ -134,11 +134,14 @@ export const claudeCode: AgentAdapter = {
     await Promise.all([finished(raw), finished(errors)]);
 
     const parsed = parser.finish();
-    const outcome = exec.timedOut
+    // Claude Code exits non-zero when it hits --max-turns, so the subtype is checked first.
+    const outcome: AgentResult["outcome"] = exec.timedOut
       ? "timeout"
-      : exec.exitCode !== 0 || parsed.isError
-        ? "error"
-        : "completed";
+      : parsed.resultSubtype === MAX_TURNS_SUBTYPE
+        ? "max_turns"
+        : exec.exitCode !== 0 || parsed.isError
+          ? "error"
+          : "completed";
 
     const transcript = [...parsed.transcript];
     // The agent records its own failures; these are the ones only we can see.
