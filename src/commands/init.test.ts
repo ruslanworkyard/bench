@@ -79,6 +79,7 @@ test("init sets up a repository, and a second run changes nothing", () => {
   assert.deepEqual(config, {
     baseBranch: "main",
     testCommand: "npm test",
+    setupCommand: "",
     agent: {
       name: "claude-code",
       command: "claude",
@@ -108,6 +109,38 @@ test("init sets up a repository, and a second run changes nothing", () => {
     { path: CONFIG_FILE, status: "skipped" },
     { path: ".gitignore", status: "present" },
   ]);
+});
+
+test("a lockfile gives the config its setup command; --setup overrides it", () => {
+  const detected = repo();
+  writeFileSync(join(detected, "package-lock.json"), "{}\n", "utf8");
+
+  const report = runJson(detected, "--test", "npm test");
+
+  assert.deepEqual(report.setupCommand, { value: "npm ci", source: "package-lock.json" });
+  const config = JSON.parse(readFileSync(join(detected, CONFIG_FILE), "utf8")) as Config;
+  assert.equal(config.setupCommand, "npm ci");
+  assert.match(run(repo(), "--setup", "make deps"), /Setup command\s+make deps\s+--setup flag/);
+
+  const overridden = repo();
+  writeFileSync(join(overridden, "package-lock.json"), "{}\n", "utf8");
+  runJson(overridden, "--setup", "make deps");
+  const config2 = JSON.parse(readFileSync(join(overridden, CONFIG_FILE), "utf8")) as Config;
+  assert.equal(config2.setupCommand, "make deps");
+});
+
+test("init on a repository whose config predates setupCommand still loads it", () => {
+  const root = repo();
+  writeFileSync(join(root, ".harnessbench"), "", "utf8");
+  rmSync(join(root, ".harnessbench"));
+  run(root, "--test", "npm test");
+  const path = join(root, CONFIG_FILE);
+  const { setupCommand: _dropped, ...older } = JSON.parse(readFileSync(path, "utf8")) as Config;
+  writeFileSync(path, `${JSON.stringify(older, null, 2)}\n`, "utf8");
+
+  const report = runJson(root, "--test", "npm test");
+
+  assert.ok(report.files.some((file) => file.path === CONFIG_FILE && file.status === "skipped"));
 });
 
 test("--dry-run writes nothing", () => {
@@ -144,6 +177,7 @@ test("the human summary reports what was found and what to do next", () => {
 
   assert.match(output, /CLAUDE\.md\s+convention/);
   assert.match(output, /Test command\s+npm test\s+--test flag/);
+  assert.match(output, /Setup command\s+none detected \(set setupCommand if the agent needs dependencies installed\)/);
   assert.match(output, /Base branch\s+main\s+current branch main/);
   assert.match(output, /Next: harnessbench run/);
 });

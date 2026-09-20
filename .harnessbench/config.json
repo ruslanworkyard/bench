@@ -1,6 +1,7 @@
 {
   "baseBranch": "main",
   "testCommand": "npm test",
+  "setupCommand": "npm ci",
   "agent": {
     "name": "claude-code",
     "command": "claude",

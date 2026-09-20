@@ -29,10 +29,11 @@ These benchmarks cost real tokens to run. A degraded harness costs more, because
 
 1. **Fixtures** are realistic engineering tasks — a prompt and a one-line description, nothing more. Three ship with the tool; add your own under `.harnessbench/fixtures/`.
 2. **Environments** are two versions of the harness: `previous` (what's on `main`) and `candidate` (your branch). Code is identical in both; only the harness differs.
-3. An **agent adapter** runs each fixture in each environment inside a disposable workspace and records what happened: the diff, the transcript, tokens, cost, tool calls, time. Claude Code first; Codex, Aider, Gemini CLI, OpenCode and Pi to follow.
-4. A **thin mechanical layer** checks the hard facts: does your test suite still pass, how big is the diff, what did the agent spend (tokens, cost, time, tool calls).
-5. **AI judges** decide everything that can't be measured mechanically — engineering quality, scope discipline, maintainability, test intent, reasoning efficiency — by comparing the `previous` and `candidate` results side by side, blind to which is which.
-6. The report is a table of **deltas**, one row per criterion: `compare` turns the two runs into it, and `run` prints it as soon as both sides are in. Improvements and regressions are both visible, and a delta below the noise threshold is reported as unchanged rather than dressed up as signal. Nothing rolls the rows into a score.
+3. A **setup command** from the config (`npm ci`, `go mod download`, detected from the lockfile) makes each disposable workspace ready before the agent's clock starts, so the first turns are not spent discovering that nothing is installed.
+4. An **agent adapter** runs each fixture in each environment inside a disposable workspace and records what happened: the diff, the transcript, tokens, cost, tool calls, time. Claude Code first; Codex, Aider, Gemini CLI, OpenCode and Pi to follow.
+5. A **thin mechanical layer** checks the hard facts: does your test suite still pass, how big is the diff, what did the agent spend (tokens, cost, time, tool calls).
+6. **AI judges** decide everything that can't be measured mechanically — engineering quality, scope discipline, maintainability, test intent, reasoning efficiency — by comparing the `previous` and `candidate` results side by side, blind to which is which.
+7. The report is a table of **deltas**, one row per criterion: `compare` turns the two runs into it, and `run` prints it as soon as both sides are in. Improvements and regressions are both visible, and a delta below the noise threshold is reported as unchanged rather than dressed up as signal. Nothing rolls the rows into a score.
 
 Runs are content-addressed by fixture, base commit, harness hash, agent and model, so baseline runs are cached and a PR normally pays only for the candidate side.
 
@@ -50,7 +51,7 @@ Runs are content-addressed by fixture, base commit, harness hash, agent and mode
 npx harnessbench init
 ```
 
-`init` inspects the current git repository, detects your harness files (`CLAUDE.md`, `.claude/`, `AGENTS.md`, `.mcp.json` and anything they reference), your test command, your base branch and which agents are installed, then writes `.harnessbench/config.json` you can edit and copies the starter fixtures into `.harnessbench/fixtures/`. Run it with `--dry-run` first to see what it would do, or `--json` for machine-readable output.
+`init` inspects the current git repository, detects your harness files (`CLAUDE.md`, `.claude/`, `AGENTS.md`, `.mcp.json` and anything they reference), your test command, your setup command (from the lockfile: `package-lock.json` means `npm ci`, `go.sum` means `go mod download`, and so on; a manifest without a lockfile is not enough), your base branch and which agents are installed, then writes `.harnessbench/config.json` you can edit and copies the starter fixtures into `.harnessbench/fixtures/`. Run it with `--dry-run` first to see what it would do, or `--json` for machine-readable output.
 
 The config it writes is small and meant to be edited by hand:
 
@@ -58,6 +59,7 @@ The config it writes is small and meant to be edited by hand:
 {
   "baseBranch": "main",
   "testCommand": "npm test",
+  "setupCommand": "npm ci",
   "agent": {
     "name": "claude-code",
     "command": "claude",
@@ -71,7 +73,7 @@ The config it writes is small and meant to be edited by hand:
 }
 ```
 
-`agent.name` chooses the adapter; `command` is the binary it runs (a name on `PATH` or a path), and `model`, `maxTurns` and `args` are passed through to it. A key you did not mean to set is an error naming it, rather than a setting that is silently ignored.
+`setupCommand` runs in each workspace before the agent starts, with the same minimal environment as the test command and a ten-minute cap; `""` means the tree is used as cloned. It is the project's own install step, so keep it frozen (`npm ci`, not `npm install`): anything it changes that is not ignored by git would otherwise count as the agent's diff. `agent.name` chooses the adapter; `command` is the binary it runs (a name on `PATH` or a path), and `model`, `maxTurns` and `args` are passed through to it. A key you did not mean to set is an error naming it, rather than a setting that is silently ignored.
 
 Credentials are never stored in the config. harnessbench forwards the agent's own environment variables from your shell — `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` (a subscription token from `claude setup-token`), or the Bedrock and Vertex settings — and refuses to start when none of them is set. The agent runs in a disposable clone of your repository with its own `HOME` and its own config directory, so your `~/.claude` is neither read nor written, and nothing it does can reach the original repository.
 
@@ -81,7 +83,7 @@ Then run a fixture:
 npx harnessbench run ttl-cache
 ```
 
-`run` drives the fixture twice on the same code, the current `HEAD`: once as `previous`, with the harness files as they were committed at the merge base of your branch and the base branch, and once as `candidate`, with the harness at `HEAD`. Each side gets a disposable shallow clone (for `previous`, the merge-base harness is overlaid on top and folded into the clone's single commit, so the agent sees an ordinary checkout), the fixture's prompt is handed to the agent there, the diff is captured, your test command runs against the result, and everything lands in `.harnessbench/runs/<timestamp>-<fixture>-<environment>/`: the agent's raw output stream, a normalised `transcript.jsonl`, `diff.patch`, `test.log`, `agent.stderr.log` and a `run.json` with the outcome, test result, a hash of the harness that ran, and the telemetry: what the agent reported for the whole run (tokens, cost, turns, tool calls by name) plus what the transcript says about how it worked, derived once from `transcript.jsonl` so every adapter gets it for free: turns, calls, failures and tokens per thread (the main conversation and each sub-agent, with the model it ran on), reads and turns before the first edit, distinct files read and written, repeat reads (the main thread re-reading a file) and duplicate reads (the main thread reading what a sub-agent already had), and the wall clock split into exploring (start to first write), building (first to last write) and verifying (last write to the end). Each transcript event carries its thread and its arrival time in milliseconds since the agent started, and each tool call its adapter-neutral kind (read, write, search, shell, spawn, other) and the file it touched, relative to the workspace. It then prints one summary per side:
+`run` drives the fixture twice on the same code, the current `HEAD`: once as `previous`, with the harness files as they were committed at the merge base of your branch and the base branch, and once as `candidate`, with the harness at `HEAD`. Each side gets a disposable shallow clone (for `previous`, the merge-base harness is overlaid on top and folded into the clone's single commit, so the agent sees an ordinary checkout), the setup command installs its dependencies (its output goes to `setup.log`; a setup that fails or times out stops the run with exit 1 and no `run.json` for that side, because a tree that cannot install is a configuration problem, not a result), the fixture's prompt is handed to the agent there, the diff is captured, your test command runs against the result, and everything lands in `.harnessbench/runs/<timestamp>-<fixture>-<environment>/`: the agent's raw output stream, a normalised `transcript.jsonl`, `diff.patch`, `setup.log`, `test.log`, `agent.stderr.log` and a `run.json` with the outcome, setup and test results, a hash of the harness that ran, and the telemetry: what the agent reported for the whole run (tokens, cost, turns, tool calls by name) plus what the transcript says about how it worked, derived once from `transcript.jsonl` so every adapter gets it for free: turns, calls, failures and tokens per thread (the main conversation and each sub-agent, with the model it ran on), reads and turns before the first edit, distinct files read and written, repeat reads (the main thread re-reading a file) and duplicate reads (the main thread reading what a sub-agent already had), and the wall clock split into exploring (start to first write), building (first to last write) and verifying (last write to the end). Each transcript event carries its thread and its arrival time in milliseconds since the agent started, and each tool call its adapter-neutral kind (read, write, search, shell, spawn, other) and the file it touched, relative to the workspace. It then prints one summary per side:
 
 ```
 harnessbench run  ttl-cache · previous  → completed in 3m48s
@@ -95,6 +97,7 @@ harnessbench run  ttl-cache · candidate  → completed in 4m12s
 
 Harness    2 files at 0655c52 (HEAD) · hash fde8ac86d613
 Agent      claude-code · claude-sonnet-4-5
+Setup      npm ci → ok in 24s
 Turns      23   Tool calls  41 (Read 18, Edit 9, Bash 14)   Tool failures 2
 Threads    main 20 turns / 30 calls · Explore on claude-haiku-4-5: 11 calls
 Phases     exploring 1m02s · building 2m30s · verifying 40s

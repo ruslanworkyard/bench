@@ -49,6 +49,7 @@ function record(
     agent: { name: "claude-code", command: "claude", model: "claude-sonnet-4-5" },
     outcome: "completed",
     exitCode: 0,
+    setup: null,
     startedAt: "2026-09-19T03:14:55.000Z",
     finishedAt: "2026-09-19T03:19:07.000Z",
     tokens: { input: 1000, output: 20000, cacheRead: 400000, cacheWrite: 10000 },

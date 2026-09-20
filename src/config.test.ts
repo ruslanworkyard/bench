@@ -29,6 +29,13 @@ test("an empty config is all defaults", () => {
   });
 });
 
+test("a config without setupCommand loads as no setup; with it, the command round-trips", () => {
+  const before = { baseBranch: "main", testCommand: "npm test" };
+  assert.equal(validate(before).setupCommand, "");
+  assert.equal(validate({ ...before, setupCommand: "npm ci" }).setupCommand, "npm ci");
+  rejects({ setupCommand: ["npm", "ci"] }, /"setupCommand" must be a string, found an array/);
+});
+
 test("a full agent block survives validation unchanged", () => {
   const agent = {
     name: "claude-code",

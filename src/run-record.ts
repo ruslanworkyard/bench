@@ -27,13 +27,16 @@ export type RunOutcome = "completed" | "max_turns" | "timeout" | "error";
 export const ENVIRONMENTS = ["previous", "candidate"] as const;
 export type Environment = (typeof ENVIRONMENTS)[number];
 
-export type TestResult = {
+/** How one command run in the workspace went: the setup command, or the test command. */
+export type CommandResult = {
   command: string;
-  /** Null when the test command was killed, including on timeout. */
+  /** Null when the command was killed, including on timeout. */
   exitCode: number | null;
   durationMs: number;
   timedOut: boolean;
 };
+
+export type TestResult = CommandResult;
 
 export type RunRecord = {
   schema: typeof RUN_RECORD_SCHEMA;
@@ -50,6 +53,13 @@ export type RunRecord = {
   outcome: RunOutcome;
   /** Null when the agent was killed by a signal, including on timeout. */
   exitCode: number | null;
+  /**
+   * The setup command that made the tree ready before the agent started; null when none is
+   * configured. A failed setup never gets a record, so this is always a success when present.
+   * Its time is not part of durationMs or startedAt, which measure the agent only.
+   */
+  setup: CommandResult | null;
+  /** When the agent started: after the clone, the overlay and the setup command. */
   startedAt: string;
   finishedAt: string;
   tokens: Usage;

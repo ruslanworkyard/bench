@@ -4,7 +4,7 @@ import { init } from "./commands/init.js";
 import { run } from "./commands/run.js";
 import { CliError } from "./errors.js";
 
-const VALUE_FLAGS = new Set(["base", "test", "agent", "max-turns", "model", "fixture"]);
+const VALUE_FLAGS = new Set(["base", "test", "setup", "agent", "max-turns", "model", "fixture"]);
 const BOOLEAN_FLAGS = new Set(["dry-run", "json", "keep", "markdown", "help"]);
 
 const HELP = `harnessbench - Regression tests for your CLAUDE.md.
@@ -22,6 +22,7 @@ or for the latest run of --fixture <id>.
 Options:
   --base <branch>   Base branch to compare against (overrides config/detection)
   --test <command>  Test command (init only; overrides detection)
+  --setup <command> Setup command run before the agent, e.g. npm ci (init only; overrides detection)
   --agent <name>    Agent to drive, by adapter name (overrides config/detection)
   --max-turns <n>   Agent turn limit for this run (run only; overrides config)
   --model <name>    Model for this run (run only; overrides config)
@@ -34,7 +35,8 @@ Options:
 
 Exit codes (run): 0 completed, 2 agent timed out, 3 agent error, 4 agent hit the turn
 limit, 1 anything else; the worse of the two sides wins. A failing test suite is a result,
-not an error: it does not change the exit code. compare exits 0 after printing: it reports,
+not an error: it does not change the exit code. A failing setup command is exit 1 with no
+run.json for that side. compare exits 0 after printing: it reports,
 it does not gate.`;
 
 type Flags = Record<string, string | true>;
@@ -98,6 +100,7 @@ async function main(argv: string[]): Promise<number> {
       cwd: process.cwd(),
       base: value(flags, "base"),
       test: value(flags, "test"),
+      setup: value(flags, "setup"),
       agent: value(flags, "agent"),
       dryRun: flags["dry-run"] === true,
       json: flags["json"] === true,

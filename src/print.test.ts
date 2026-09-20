@@ -102,6 +102,7 @@ function runRecord(patch: Partial<RunRecord> = {}): RunRecord {
     agent: { name: "claude-code", command: "claude", model: "claude-sonnet-4-5" },
     outcome: "completed",
     exitCode: 0,
+    setup: { command: "npm ci", exitCode: 0, durationMs: 24000, timedOut: false },
     startedAt: "2026-09-19T03:14:55.000Z",
     finishedAt: "2026-09-19T03:19:07.000Z",
     tokens: { input: 1203, output: 18940, cacheRead: 402113, cacheWrite: 10004 },
@@ -130,6 +131,17 @@ function runRecord(patch: Partial<RunRecord> = {}): RunRecord {
     ...patch,
   };
 }
+
+test("formatRun shows the setup command only when one ran", () => {
+  const lines = formatRun(runRecord(), "/nonexistent/agent.stderr.log").split("\n");
+  assert.ok(lines.includes("Setup      npm ci → ok in 24s"), lines.join("\n"));
+
+  const failed = runRecord({ setup: { command: "npm ci", exitCode: 1, durationMs: 3000, timedOut: false } });
+  assert.ok(formatRun(failed, "/nonexistent").includes("Setup      npm ci → failed (exit 1) in 3s"));
+
+  const none = formatRun(runRecord({ setup: null }), "/nonexistent").split("\n");
+  assert.equal(none.some((line) => line.startsWith("Setup")), false);
+});
 
 test("formatRun summarises threads and phases on one line each", () => {
   const lines = formatRun(runRecord(), "/nonexistent/agent.stderr.log").split("\n");

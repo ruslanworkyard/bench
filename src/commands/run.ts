@@ -5,6 +5,7 @@ import type { AgentAdapter, AgentResult } from "../agents/types.js";
 import { compare } from "../compare.js";
 import { RUNS_DIR, type AgentConfig } from "../config.js";
 import { dirtyHarnessFiles, harnessFiles, type HarnessSnapshot } from "../detect/harness.js";
+import { CliError } from "../errors.js";
 import {
   requireAgent,
   requireAgentCommand,
@@ -22,9 +23,9 @@ import { formatComparison, formatDirtyHarness, formatRun, formatSameHarness } fr
 import {
   ENVIRONMENTS,
   writeRunRecord,
+  type CommandResult,
   type Environment,
   type RunRecord,
-  type TestResult,
 } from "../run-record.js";
 import { telemetry } from "../telemetry.js";
 import { withWorkspace, type Workspace } from "../workspace.js";
@@ -41,8 +42,9 @@ export type RunOptions = {
   json: boolean;
 };
 
-/** A test suite that has not finished in this long is not going to. */
-const TEST_TIMEOUT_MS = 10 * 60_000;
+/** A test suite, or a dependency install, that has not finished in this long is not going to. */
+const COMMAND_TIMEOUT_MS = 10 * 60_000;
+const SETUP_LOG = "setup.log";
 
 /** Everything one side of a run needs that the other side shares. */
 type Side = {
@@ -57,6 +59,7 @@ type Side = {
   adapter: AgentAdapter;
   agentConfig: AgentConfig;
   agentPath: string;
+  setupCommand: string;
   testCommand: string;
   keep: boolean;
 };
@@ -107,6 +110,7 @@ export async function run(options: RunOptions): Promise<RunRecord[]> {
     adapter,
     agentConfig,
     agentPath,
+    setupCommand: config.setupCommand,
     testCommand: config.testCommand,
     keep: options.keep,
   };
@@ -115,9 +119,21 @@ export async function run(options: RunOptions): Promise<RunRecord[]> {
   for (const environment of ENVIRONMENTS) {
     const runId = `${stamp}-${fixture.fixture.id}-${environment}`;
     const harness = environment === "previous" ? previous : head;
-    const { record, stderrPath } = await runSide({ ...shared, runId, environment, harness });
-    records.push(record);
-    summaries.push(formatRun(record, stderrPath));
+    let side: { record: RunRecord; stderrPath: string };
+    try {
+      side = await runSide({ ...shared, runId, environment, harness });
+    } catch (error) {
+      // A side that already ran is not lost with the other side's failure: say where it is.
+      if (error instanceof CliError && records.length > 0) {
+        const kept = records
+          .map((record) => `the ${record.environment} side ran and its record is at ${RUNS_DIR}/${record.runId}`)
+          .join("\n");
+        throw new CliError(`${error.message}\n${kept}`, error.exitCode);
+      }
+      throw error;
+    }
+    records.push(side.record);
+    summaries.push(formatRun(side.record, side.stderrPath));
   }
 
   const comparison = compare(...(records as [RunRecord, RunRecord]));
@@ -126,7 +142,11 @@ export async function run(options: RunOptions): Promise<RunRecord[]> {
   return records;
 }
 
-/** One environment: its workspace, the agent, the diff, the tests, and its run directory. */
+/**
+ * One environment: its workspace, the setup command, the agent, the diff, the tests, and its
+ * run directory. Throws CliError when the setup command fails: a tree that cannot install is
+ * a configuration problem, not a result, so no run.json is written and no agent starts.
+ */
 async function runSide(side: Side): Promise<{ record: RunRecord; stderrPath: string }> {
   const runDir = join(side.root, RUNS_DIR, side.runId);
   // Before the agent starts, so a crash mid-run still leaves the raw stream behind.
@@ -141,6 +161,10 @@ async function runSide(side: Side): Promise<{ record: RunRecord; stderrPath: str
         await ws.rebaseline();
       }
 
+      // Before the agent's clock starts; the agent sees only the tree it leaves behind.
+      const setup = side.setupCommand === "" ? null : await runLogged(ws, side.setupCommand, join(runDir, SETUP_LOG));
+      if (setup !== null && setup.exitCode !== 0) throw setupFailed(side, setup, join(RUNS_DIR, side.runId, SETUP_LOG));
+
       const startedAt = new Date();
       const result = await side.adapter.run({
         workspace: ws,
@@ -154,7 +178,7 @@ async function runSide(side: Side): Promise<{ record: RunRecord; stderrPath: str
       writeFileSync(join(runDir, "diff.patch"), diff, "utf8");
 
       const tests =
-        side.testCommand === "" ? null : await runTests(ws, side.testCommand, join(runDir, "test.log"));
+        side.testCommand === "" ? null : await runLogged(ws, side.testCommand, join(runDir, "test.log"));
 
       const transcript = result.transcript.map((event) => JSON.stringify(event));
       writeFileSync(
@@ -174,6 +198,7 @@ async function runSide(side: Side): Promise<{ record: RunRecord; stderrPath: str
         agent: { name: side.adapter.name, command: side.agentPath, model: result.model },
         outcome: result.outcome,
         exitCode: result.exitCode,
+        setup,
         startedAt: startedAt.toISOString(),
         finishedAt: new Date().toISOString(),
         ...spend(result),
@@ -200,14 +225,27 @@ function timestamp(date: Date): string {
   return date.toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
 }
 
-/** Runs the suite in the workspace, keeping its output as `logPath`. */
-async function runTests(ws: Workspace, command: string, logPath: string): Promise<TestResult> {
+function setupFailed(side: Side, setup: CommandResult, logPath: string): CliError {
+  const how = setup.timedOut
+    ? `timed out after ${Math.round(setup.durationMs / 1000)}s`
+    : setup.exitCode === null
+      ? "was killed"
+      : `exited with code ${setup.exitCode}`;
+  return new CliError(
+    `${side.environment}: setup command \`${setup.command}\` ${how}; the agent was not started.\n` +
+      `Its output is in ${logPath}. Fix the command, or the tree it runs in, and run again; ` +
+      `setupCommand lives in .harnessbench/config.json.`,
+  );
+}
+
+/** Runs a command in the workspace tree, keeping its output as `logPath`. */
+async function runLogged(ws: Workspace, command: string, logPath: string): Promise<CommandResult> {
   const log = createWriteStream(logPath);
   const write = (chunk: string): void => {
     log.write(chunk);
   };
   const result = await ws.exec(command, {
-    timeoutMs: TEST_TIMEOUT_MS,
+    timeoutMs: COMMAND_TIMEOUT_MS,
     onStdout: write,
     onStderr: write,
   });

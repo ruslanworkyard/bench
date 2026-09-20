@@ -242,6 +242,7 @@ test("run drives the agent in a workspace, once per environment, and leaves comp
     durationMs: 0,
     timedOut: false,
   });
+  assert.equal(record.setup, null); // init found no lockfile in this repository.
   assert.ok(Date.parse(record.startedAt) <= Date.parse(record.finishedAt));
 
   // The raw stream is the recording, verbatim; the transcript is one event per line.
@@ -352,6 +353,94 @@ test("a failing test command is a result, not a failure of the run", () => {
   assert.equal(record.tests?.timedOut, false);
   assert.match(readFileSync(join(runDir(root), "test.log"), "utf8"), /the suite is broken/);
   assert.match(stdout, /Tests\s+.*→ failed, exit 1/);
+});
+
+test("the setup command runs in the tree before the agent, and is recorded apart from the agent's time", () => {
+  const root = repoWithFake("fake-claude.sh", {
+    setupCommand: "echo installing deps && echo ready > deps-installed.txt",
+  });
+
+  const { stdout } = ok(root, "run", "ttl-cache");
+
+  // What setup left behind is what the agent finds; the host repository gets none of it.
+  const dump = readFileSync(ENV["FAKE_CLAUDE_DUMP"] as string, "utf8");
+  assert.match(dump, /^files: .*\bdeps-installed\.txt\b/m);
+  assert.equal(existsSync(join(root, "deps-installed.txt")), false);
+
+  for (const dir of Object.values(runDirs(root))) {
+    assert.match(readFileSync(join(dir, "setup.log"), "utf8"), /installing deps/);
+    const record = readRunRecord(dir);
+    assert.deepEqual(record.setup && { ...record.setup, durationMs: 0 }, {
+      command: "echo installing deps && echo ready > deps-installed.txt",
+      exitCode: 0,
+      durationMs: 0,
+      timedOut: false,
+    });
+    assert.ok((record.setup?.durationMs ?? -1) >= 0);
+    // Setup time is not agent time: the record's clock starts once the tree is ready.
+    assert.equal(record.durationMs, record.telemetry?.phases.exploringMs);
+  }
+  assert.match(stdout, /Setup\s+echo installing deps && echo ready > deps-installed\.txt → ok in /);
+});
+
+test("a failing setup command fails the run before any agent starts, and leaves its log", () => {
+  const root = repoWithFake("fake-claude.sh", { setupCommand: "echo cannot install >&2; exit 7" });
+  const dumpBefore = existsSync(ENV["FAKE_CLAUDE_DUMP"] as string) && readFileSync(ENV["FAKE_CLAUDE_DUMP"] as string, "utf8");
+
+  const { status, stderr } = fails(root, "run", "ttl-cache");
+
+  assert.equal(status, 1);
+  assert.match(stderr, /previous: setup command `echo cannot install >&2; exit 7` exited with code 7/);
+  assert.match(stderr, /the agent was not started/);
+  assert.match(stderr, new RegExp(`${RUNS_DIR}/\\d{8}-\\d{6}-ttl-cache-previous/setup\\.log`));
+  assert.doesNotMatch(stderr, /candidate: setup command|candidate side ran/);
+
+  // Only the previous side got a directory, holding the log and nothing of a run.
+  const runs = join(root, RUNS_DIR);
+  const entries = execFileSync("ls", [runs], { encoding: "utf8" }).trim().split("\n");
+  assert.equal(entries.length, 1, entries.join(", "));
+  const dir = join(runs, entries[0] as string);
+  assert.match(dir, /-previous$/);
+  assert.equal(readFileSync(join(dir, "setup.log"), "utf8"), "cannot install\n");
+  assert.equal(existsSync(join(dir, "run.json")), false);
+  assert.equal(existsSync(join(dir, "raw.jsonl")), false);
+  // The fake agent never ran: its dump is whatever an earlier test left, or nothing.
+  const dumpAfter = existsSync(ENV["FAKE_CLAUDE_DUMP"] as string) && readFileSync(ENV["FAKE_CLAUDE_DUMP"] as string, "utf8");
+  assert.equal(dumpAfter, dumpBefore);
+});
+
+test("when previous ran and candidate's setup fails, the error names the side and the surviving record", () => {
+  // The two trees differ only in their harness: a rule file that exists on the candidate side.
+  const { root } = repoOnBranch();
+  const path = join(root, CONFIG_FILE);
+  const config = JSON.parse(readFileSync(path, "utf8")) as Config;
+  config.setupCommand = "test ! -e .claude/rules.md";
+  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  git(root, "commit", "--quiet", "-am", "setup that only the previous tree survives");
+
+  const { status, stderr } = fails(root, "run", "ttl-cache");
+
+  assert.equal(status, 1);
+  assert.match(stderr, /candidate: setup command `test ! -e \.claude\/rules\.md` exited with code 1/);
+  assert.match(stderr, new RegExp(`the previous side ran and its record is at ${RUNS_DIR}/\\d{8}-\\d{6}-ttl-cache-previous`));
+
+  const dirs = runDirs(root);
+  assert.equal(readRunRecord(dirs.previous).outcome, "completed");
+  assert.equal(readRunRecord(dirs.previous).setup?.exitCode, 0);
+  assert.ok(existsSync(join(dirs.candidate, "setup.log")));
+  assert.equal(existsSync(join(dirs.candidate, "run.json")), false);
+});
+
+test("no setup command means nothing runs before the agent, and no log", () => {
+  const root = repoWithFake("fake-claude.sh", { setupCommand: "" });
+
+  const { stdout } = ok(root, "run", "ttl-cache");
+
+  for (const dir of Object.values(runDirs(root))) {
+    assert.equal(readRunRecord(dir).setup, null);
+    assert.equal(existsSync(join(dir, "setup.log")), false);
+  }
+  assert.doesNotMatch(stdout, /^Setup/m);
 });
 
 test("no test command means tests are not configured, and nothing is run", () => {

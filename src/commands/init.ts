@@ -15,6 +15,7 @@ import {
 import { agentsOnPath } from "../detect/agents.js";
 import { baseBranch } from "../detect/git.js";
 import { harnessFiles } from "../detect/harness.js";
+import { setupCommand } from "../detect/setup-command.js";
 import { testCommand } from "../detect/test-command.js";
 import type { Detection } from "../detect/types.js";
 import { copyOps, listFixtures, packagedFixturesDir } from "../fixtures.js";
@@ -26,6 +27,7 @@ export type InitOptions = {
   cwd: string;
   base?: string | undefined;
   test?: string | undefined;
+  setup?: string | undefined;
   agent?: string | undefined;
   dryRun: boolean;
   json: boolean;
@@ -65,6 +67,7 @@ export function init(options: InitOptions): void {
   const agents = agentsOnPath();
 
   const test = override(options.test, "--test", testCommand(root));
+  const setup = override(options.setup, "--setup", setupCommand(root));
   const agent = override(options.agent, "--agent", detectAgent(agents));
   const base = override(options.base, "--base", baseBranch(root));
 
@@ -76,6 +79,7 @@ export function init(options: InitOptions): void {
     ...defaults(),
     ...(base === null ? {} : { baseBranch: base.value }),
     testCommand: test?.value ?? "",
+    setupCommand: setup?.value ?? "",
     agent: {
       ...defaults().agent,
       name: adapter?.name ?? "",
@@ -129,6 +133,7 @@ export function init(options: InitOptions): void {
     dryRun: options.dryRun,
     harness,
     testCommand: test,
+    setupCommand: setup,
     agent,
     agentsOnPath: agents?.value ?? [],
     baseBranch: base,

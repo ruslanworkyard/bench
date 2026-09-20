@@ -54,7 +54,7 @@ Goal: an open-source npm package (`npx harnessbench`) people adopt. Quality over
     config.json                         written by init, committed
     fixtures/<id>/                      fixture.json + prompt.md, committed; built-ins are copied here
     runs/<ts>-<fixture>-<env>/          one run, gitignored: run.json, raw.jsonl, transcript.jsonl,
-                                        diff.patch, test.log, agent.stderr.log
+                                        diff.patch, setup.log, test.log, agent.stderr.log
 ```
 The tool reads the host through git, writes only under `.harnessbench/`, and works in a temp
 worktree (`$TMPDIR/harnessbench/<run>/tree`) with an isolated `HOME` for the agent.
@@ -77,14 +77,17 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
 | `cli.ts` | argv, exit codes | nothing else |
 
 **Domain nouns** — an object that appears in several layers gets its own top-level file:
-- `config.ts` — `Config` type (including the `agent` block), defaults, load/validate. Unknown
-  keys at any level are an error naming the key: a typo is otherwise a silently ignored setting.
+- `config.ts` — `Config` type (`baseBranch`, `testCommand`, `setupCommand`, the `agent` block,
+  `harness.extraPaths`), defaults, load/validate. Unknown keys at any level are an error naming
+  the key: a typo is otherwise a silently ignored setting. A missing key takes its default, so a
+  config written before a key existed keeps loading (`setupCommand` → `""`).
 - `fixtures.ts` — locate packaged fixtures via `import.meta.url`, copy into the host.
 - `workspace.ts` — a throwaway clone of the host + an isolated HOME, for one run; also the
   harness overlay (`overlayHarness`) and `rebaseline`, which folds the overlay into the clone's
   single commit so the agent sees a plain checkout and `diff()` measures only the agent's work.
-- `run-record.ts` — `RunRecord` (`run.json`, `schema: 2`), `Environment`, `writeRunRecord`,
-  `readRunRecord`.
+- `run-record.ts` — `RunRecord` (`run.json`, `schema: 2`), `Environment`, `CommandResult`
+  (the shape of both `setup` and `tests`: command, exitCode, durationMs, timedOut),
+  `writeRunRecord`, `readRunRecord`.
   Later commands (compare, judge) read a run only through `readRunRecord`, which rejects any
   other schema number; that is the one place run-file compatibility lives.
 - `telemetry.ts` — `telemetry(events, durationMs): Telemetry`, pure, from the normalised
@@ -221,6 +224,28 @@ a fake shell script stands in, so the suite is free, offline and deterministic.
   - Not built: a flag to run one side only (cheap to add when the judge/compare story needs
     it; today `run` always pays for both), and reusing an earlier `previous` run with the same
     hash instead of re-running it.
+
+- `setupCommand` (2026-09-20). Every real run had spent its first turns on `tsc: command not
+  found` and `npm install`: tool noise in exactly the rows compare reports. Config gained
+  `setupCommand: string` (`""` = none). `detect/setup-command.ts` claims a command only from a
+  lockfile, never a manifest alone (a non-frozen install rewrites the lockfile and pollutes the
+  diff): package-lock → `npm ci`, pnpm-lock → `pnpm install --frozen-lockfile`, yarn.lock →
+  `yarn install --frozen-lockfile`, bun.lock(b) → `bun install --frozen-lockfile`, go.sum → `go
+  mod download`, Gemfile.lock → `bundle install`, composer.lock → `composer install`,
+  poetry.lock → `poetry install`, requirements.txt (no poetry.lock) → `pip install -r
+  requirements.txt`; Cargo/Gradle/Maven fetch during the build, no entry; several lockfiles
+  join with ` && ` in that order. `init` writes it, `--setup` overrides, the summary has a
+  `Setup command` line. In `runSide` it runs after the overlay and before the agent, through
+  `ws.exec` with the test command's environment and 10-minute cap, output to `setup.log`;
+  `startedAt`, `durationMs` and the phases measure the agent only. `run.json` has `setup:
+  CommandResult | null`; schema stays 2 (older records simply lack the key; compare does not
+  read it). A non-zero exit or timeout is a `CliError` (exit 1) naming the side, command, exit
+  code and log path, thrown before the agent starts: no `run.json` for that side, `setup.log`
+  kept; if `previous` already ran, the message says where its record is. `formatRun` prints
+  `Setup      npm ci → ok in 24s` only when configured. Not built: caching installs between
+  runs; rebaselining after setup (whatever setup leaves un-ignored in the tree shows in the
+  diff, so keep installs frozen and their output gitignored). `test/fixtures/fake-claude.sh`
+  now dumps a `files:` line listing its cwd, so tests can see what setup left for the agent.
 
 - `compare` (2026-09-20). `harnessbench compare [<previous-id> <candidate-id>] [--fixture <id>]
   [--json] [--markdown]` prints the per-criterion delta table for one previous/candidate pair;

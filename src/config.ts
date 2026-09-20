@@ -29,11 +29,13 @@ export type AgentConfig = {
 export type Config = {
   baseBranch: string;
   testCommand: string;
+  /** Run in the workspace before the agent starts, to install dependencies. Empty means none. */
+  setupCommand: string;
   agent: AgentConfig;
   harness: { extraPaths: string[] };
 };
 
-const TOP_KEYS = ["baseBranch", "testCommand", "agent", "harness"] as const;
+const TOP_KEYS = ["baseBranch", "testCommand", "setupCommand", "agent", "harness"] as const;
 const AGENT_KEYS = [
   "name",
   "command",
@@ -49,6 +51,7 @@ export function defaults(): Config {
   return {
     baseBranch: DEFAULT_BASE_BRANCH,
     testCommand: "",
+    setupCommand: "",
     agent: {
       name: "",
       command: "",
@@ -162,6 +165,8 @@ export function validate(value: unknown): Config {
 
   config.baseBranch = stringField(raw, "baseBranch", '"baseBranch"') ?? config.baseBranch;
   config.testCommand = stringField(raw, "testCommand", '"testCommand"') ?? config.testCommand;
+  // Absent in configs written before it existed; those keep loading as "no setup".
+  config.setupCommand = stringField(raw, "setupCommand", '"setupCommand"') ?? config.setupCommand;
   if (config.baseBranch.trim() === "") fail('"baseBranch" must not be empty');
 
   if (raw["agent"] !== undefined) validateAgent(raw["agent"], config.agent);

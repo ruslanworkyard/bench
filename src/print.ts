@@ -7,7 +7,7 @@ import { RUNS_DIR } from "./config.js";
 import type { HarnessEntry } from "./detect/harness.js";
 import type { Detection } from "./detect/types.js";
 import type { OpStatus } from "./plan.js";
-import type { RunRecord } from "./run-record.js";
+import type { CommandResult, RunRecord } from "./run-record.js";
 import type { Telemetry } from "./telemetry.js";
 
 export type FileReport = { path: string; status: OpStatus };
@@ -18,6 +18,7 @@ export type Report = {
   dryRun: boolean;
   harness: HarnessEntry[];
   testCommand: Detection<string> | null;
+  setupCommand: Detection<string> | null;
   agent: Detection<string> | null;
   agentsOnPath: string[];
   baseBranch: Detection<string> | null;
@@ -69,6 +70,13 @@ export function formatSummary(report: Report): string {
 
   lines.push("");
   lines.push(field("Test command", report.testCommand, "none detected"));
+  lines.push(
+    field(
+      "Setup command",
+      report.setupCommand,
+      "none detected (set setupCommand if the agent needs dependencies installed)",
+    ),
+  );
   lines.push(field("Agent", report.agent, "none found on PATH"));
   lines.push(field("Base branch", report.baseBranch, "none detected"));
 
@@ -141,6 +149,16 @@ function plural(n: number, noun: string): string {
   return `${n} ${noun}${n === 1 ? "" : "s"}`;
 }
 
+/** `npm ci → ok in 24s`, or how it failed. Only a success ever reaches a record, but a failed
+ * one is still formatted for anyone showing the result another way. */
+function setupLine(setup: CommandResult): string {
+  const took = formatDuration(setup.durationMs);
+  if (setup.timedOut) return `${setup.command} → timed out after ${took}`;
+  if (setup.exitCode === 0) return `${setup.command} → ok in ${took}`;
+  const how = setup.exitCode === null ? "killed" : `exit ${setup.exitCode}`;
+  return `${setup.command} → failed (${how}) in ${took}`;
+}
+
 function testsLine(tests: RunRecord["tests"]): string {
   if (tests === null) return "not configured";
   if (tests.timedOut) return `${tests.command} → timed out after ${formatDuration(tests.durationMs)}`;
@@ -193,6 +211,8 @@ export function formatRun(record: RunRecord, agentStderrPath: string): string {
       `(${harness.ref === harness.sha ? "merge base" : harness.ref}) · hash ${harness.hash.slice(0, 12)}`,
   );
   lines.push(`${"Agent".padEnd(11)}${record.agent.name} · ${record.agent.model ?? "model not reported"}`);
+  // Records written before the setup step have no such key at all: nothing to show either way.
+  if (record.setup) lines.push(`${"Setup".padEnd(11)}${setupLine(record.setup)}`);
   lines.push(
     `${"Turns".padEnd(11)}${String(record.turns).padEnd(5)}Tool calls  ${total}${byTool}   ` +
       `Tool failures ${record.toolFailures}`,
