@@ -14,6 +14,7 @@ import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 
+import { compare } from "../compare.js";
 import { CONFIG_FILE, RUNS_DIR, type AgentConfig, type Config } from "../config.js";
 import { readRunRecord, type Environment, type RunRecord } from "../run-record.js";
 
@@ -264,6 +265,12 @@ test("run drives the agent in a workspace, once per environment, and leaves comp
   assert.match(stdout, new RegExp(`Run dir\\s+${RUNS_DIR}/\\d{8}-\\d{6}-ttl-cache-previous`));
   assert.match(stdout, new RegExp(`Run dir\\s+${RUNS_DIR}/\\d{8}-\\d{6}-ttl-cache-candidate`));
   assert.match(stdout, /Final message: Added a TTL cache and wired it into the expensive read\./);
+
+  // The comparison of the two sides closes the output.
+  const tail = stdout.slice(stdout.lastIndexOf("harnessbench compare"));
+  assert.match(tail, /^harnessbench compare {2}ttl-cache · code [0-9a-f]{7}/);
+  assert.match(tail, /^warning: both sides ran the same harness/m);
+  assert.match(tail, /Turns\s+7\s+→ 7\s+unchanged/);
   assert.doesNotMatch(stderr, /workspace kept/);
 });
 
@@ -395,14 +402,16 @@ test("--keep leaves the workspace behind and says where; without it the workspac
   }
 });
 
-test("--json prints both run.json records, previous first, instead of the summary", () => {
+test("--json prints both run.json records, previous first, then the comparison", () => {
   const root = repoWithFake("fake-claude.sh");
 
   const { stdout } = ok(root, "run", "ttl-cache", "--json");
 
   const dirs = runDirs(root);
-  assert.deepEqual(JSON.parse(stdout), [readRunRecord(dirs.previous), readRunRecord(dirs.candidate)]);
-  assert.doesNotMatch(stdout, /Tool calls/);
+  const previous = readRunRecord(dirs.previous);
+  const candidate = readRunRecord(dirs.candidate);
+  assert.deepEqual(JSON.parse(stdout), [previous, candidate, compare(previous, candidate)]);
+  assert.doesNotMatch(stdout, /Tool calls\s+2/);
 });
 
 test("--max-turns and --model override the config for one run", () => {

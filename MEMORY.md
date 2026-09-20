@@ -87,10 +87,19 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
   `readRunRecord`.
   Later commands (compare, judge) read a run only through `readRunRecord`, which rejects any
   other schema number; that is the one place run-file compatibility lives.
+- `compare.ts` — `compare(previous, candidate): Comparison`, pure: one `Row` per criterion
+  (`id`, `label`, display strings, `delta`, `classification`, optional `note`) plus `warnings`.
+  The noise thresholds are one table in this file (relative 0.15, 0.20 for diff; absolute
+  floors turns 3, toolCalls 3, toolFailures 1, files 1, lines 20); a delta must clear both.
+  No composite, no verdict. `commands/compare.ts` loads a pair (two ids, or the latest
+  invocation for `--fixture`), orders it by environment, refuses mismatches, prints.
 - `errors.ts` — `CliError`, the shared vocabulary at the bottom of the graph.
 
 Imports form a DAG, checked by eye: `detect/*` imports nothing internal but `detect/types.ts`;
-`plan.ts` and `errors.ts` import nothing; every arrow points down. No barrel `index.ts` files —
+`plan.ts` and `errors.ts` import nothing; every arrow points down. `compare.ts` imports the
+value formatters (`formatCount`, `formatDuration`, `formatUsd`) from `print.ts` because a `Row`
+carries display strings; `print.ts` takes only the `Comparison` type back, which is erased, so
+that edge does not count. No barrel `index.ts` files —
 the explicit paths are what make the layering legible. `agents/index.ts` is the one exception,
 and is not a barrel: it is the registry that turns a config's `agent.name` into an adapter, and
 the only file that knows which adapters exist.
@@ -104,7 +113,8 @@ What the split buys: `--dry-run` and idempotence are free because one function w
 are testable with a temp dir and no mocks; every error message is in one file, so they are
 consistently actionable.
 
-Split triggers (do not pre-empt them):
+Split triggers (do not pre-empt them; the `print/` one has fired on paper with `compare` as
+the third command, and is deferred until `print.ts` actually hurts):
 - `runtime/` — this one fired, as `agents/`: the agent runner is a folder because it has an
   interface (`types.ts`), a registry (`index.ts`) and one file per agent. The harness overlay
   turned out to be two methods on `Workspace`, not a sibling. The judge is the next candidate;
@@ -195,6 +205,19 @@ a fake shell script stands in, so the suite is free, offline and deterministic.
     it; today `run` always pays for both), and reusing an earlier `previous` run with the same
     hash instead of re-running it.
 
+- `compare` (2026-09-20). `harnessbench compare [<previous-id> <candidate-id>] [--fixture <id>]
+  [--json] [--markdown]` prints the per-criterion delta table for one previous/candidate pair;
+  `run` prints the same table after its two summaries (and appends the `Comparison` as a
+  third element of `--json`). Rows, in order: outcome, tests, diff.files, diff.lines, turns,
+  toolCalls, toolFailures, tokens.total, tokens.output, costUsd, durationMs. Lower is better for
+  every numeric row; counts show a signed delta, quantities a percentage. Warnings: a side that
+  did not complete (effort rows from `turns` down become `n/a`), models differ, harness hashes
+  equal, ids from different `run` invocations (still compared). A fixed line above every table
+  says one run per side and that sub-threshold deltas are `unchanged`. Refusals name both run
+  ids: not one of each environment, different fixtures, different `headSha`, unreadable record.
+  Latest-pair selection takes the newest timestamp prefix with both directories present and
+  ignores a lone side. Exit 0 always; no gating, no thresholds in config, no `runs` listing.
+
 ## Next
 
 1. Test `init --dry-run` on a real repo with a real `CLAUDE.md`; check the harness list,
@@ -202,8 +225,10 @@ a fake shell script stands in, so the suite is free, offline and deterministic.
 2. Real-agent smoke of `run` (see above); fix what the real stream shows that the recording
    did not.
 3. Judge: pairwise, blind, position-swapped, structured output; default rubrics.
-4. `compare` + markdown report; GitHub Action that comments on PRs touching harness files.
-   Cache `previous` by harness hash so a PR pays only for the candidate side.
+4. GitHub Action that comments `compare --markdown` on PRs touching harness files.
+   Cache `previous` by harness hash so a PR pays only for the candidate side. Then the
+   telemetry rows a later task adds to `run.json` (reads before first edit, sub-agents) and
+   the judge's rows join the same table.
 5. More agent adapters (Codex, Aider, Gemini CLI, OpenCode, Pi): implement `AgentAdapter` and
    register it in `agents/index.ts`. Note `detect/agents.ts` knows more binaries than we have
    adapters for — it reports what is on PATH; only a binary with an adapter is offered.

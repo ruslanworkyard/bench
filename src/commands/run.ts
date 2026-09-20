@@ -2,6 +2,7 @@ import { createWriteStream, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { AgentAdapter, AgentResult } from "../agents/types.js";
+import { compare } from "../compare.js";
 import { RUNS_DIR, type AgentConfig } from "../config.js";
 import { dirtyHarnessFiles, harnessFiles, type HarnessSnapshot } from "../detect/harness.js";
 import {
@@ -17,7 +18,7 @@ import {
   requireRepo,
   type LoadedFixture,
 } from "../preflight.js";
-import { formatDirtyHarness, formatRun, formatSameHarness } from "../print.js";
+import { formatComparison, formatDirtyHarness, formatRun, formatSameHarness } from "../print.js";
 import {
   ENVIRONMENTS,
   writeRunRecord,
@@ -62,7 +63,8 @@ type Side = {
 /**
  * Runs one fixture twice on the code at HEAD: with the harness at the merge base with the
  * base branch (`previous`), then with the harness at HEAD (`candidate`). Each side gets its
- * own workspace and run directory; both are recorded and summarised, in that order.
+ * own workspace and run directory; both are recorded and summarised, in that order, and
+ * the comparison of the two comes last.
  */
 export async function run(options: RunOptions): Promise<RunRecord[]> {
   requireGit();
@@ -117,8 +119,9 @@ export async function run(options: RunOptions): Promise<RunRecord[]> {
     summaries.push(formatRun(record, stderrPath));
   }
 
-  if (options.json) console.log(JSON.stringify(records, null, 2));
-  else console.log(summaries.join("\n\n"));
+  const comparison = compare(...(records as [RunRecord, RunRecord]));
+  if (options.json) console.log(JSON.stringify([...records, comparison], null, 2));
+  else console.log([...summaries, formatComparison(comparison)].join("\n\n"));
   return records;
 }
 

@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { relative } from "node:path";
 
+// Type-only, so compare.ts importing the value formatters below is not a cycle.
+import type { Comparison } from "./compare.js";
 import { RUNS_DIR } from "./config.js";
 import type { HarnessEntry } from "./detect/harness.js";
 import type { Detection } from "./detect/types.js";
@@ -117,7 +119,7 @@ export function formatSameHarness(sha: string): string {
 const STDERR_TAIL_LINES = 5;
 const FINAL_MESSAGE_LINES = 3;
 
-function duration(ms: number): string {
+export function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`;
   const seconds = Math.round(ms / 1000);
   if (seconds < 60) return `${seconds}s`;
@@ -126,8 +128,12 @@ function duration(ms: number): string {
   return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
 }
 
-function count(n: number): string {
+export function formatCount(n: number): string {
   return n.toLocaleString("en-US");
+}
+
+export function formatUsd(n: number): string {
+  return `$${n.toFixed(2)}`;
 }
 
 function plural(n: number, noun: string): string {
@@ -136,8 +142,8 @@ function plural(n: number, noun: string): string {
 
 function testsLine(tests: RunRecord["tests"]): string {
   if (tests === null) return "not configured";
-  if (tests.timedOut) return `${tests.command} → timed out after ${duration(tests.durationMs)}`;
-  if (tests.exitCode === 0) return `${tests.command} → passed in ${duration(tests.durationMs)}`;
+  if (tests.timedOut) return `${tests.command} → timed out after ${formatDuration(tests.durationMs)}`;
+  if (tests.exitCode === 0) return `${tests.command} → passed in ${formatDuration(tests.durationMs)}`;
   const how = tests.exitCode === null ? "killed" : `exit ${tests.exitCode}`;
   return `${tests.command} → failed, ${how}`;
 }
@@ -152,7 +158,7 @@ export function formatRun(record: RunRecord, agentStderrPath: string): string {
   const when = record.outcome === "completed" ? "in" : "after";
   lines.push(
     `harnessbench run  ${record.fixture} · ${record.environment}  → ` +
-      `${record.outcome} ${when} ${duration(record.durationMs)}`,
+      `${record.outcome} ${when} ${formatDuration(record.durationMs)}`,
   );
 
   const calls = Object.entries(record.toolCalls);
@@ -172,10 +178,10 @@ export function formatRun(record: RunRecord, agentStderrPath: string): string {
       `Tool failures ${record.toolFailures}`,
   );
   lines.push(
-    `${"Tokens".padEnd(11)}in ${count(tokens.input)}  out ${count(tokens.output)}  ` +
-      `cache read ${count(tokens.cacheRead)}  cache write ${count(tokens.cacheWrite)}`,
+    `${"Tokens".padEnd(11)}in ${formatCount(tokens.input)}  out ${formatCount(tokens.output)}  ` +
+      `cache read ${formatCount(tokens.cacheRead)}  cache write ${formatCount(tokens.cacheWrite)}`,
   );
-  lines.push(`${"Cost".padEnd(11)}${record.costUsd === null ? "not reported" : `$${record.costUsd.toFixed(2)}`}`);
+  lines.push(`${"Cost".padEnd(11)}${record.costUsd === null ? "not reported" : formatUsd(record.costUsd)}`);
   lines.push(
     `${"Changes".padEnd(11)}${plural(record.diff.files, "file")}, +${record.diff.added} / -${record.diff.removed}`,
   );
@@ -198,5 +204,87 @@ export function formatRun(record: RunRecord, agentStderrPath: string): string {
     for (const line of tail) lines.push(`  ${line}`);
   }
 
+  return lines.join("\n");
+}
+
+/** Printed above every comparison table. Not a warning: it is true of every comparison. */
+export const NOISE_LINE =
+  "one run per side; deltas below the noise threshold are reported as unchanged";
+
+function short(sha: string): string {
+  return sha.slice(0, 7);
+}
+
+/** One model when both sides agree, otherwise both, named by side. */
+function models(c: Comparison): string {
+  const previous = c.previous.model ?? "not reported";
+  const candidate = c.candidate.model ?? "not reported";
+  return previous === candidate ? previous : `previous ${previous} → candidate ${candidate}`;
+}
+
+/** The delta table for one fixture: header, the fixed noise line, warnings, then the rows. */
+export function formatComparison(c: Comparison): string {
+  const lines: string[] = [];
+  lines.push(`harnessbench compare  ${c.fixture} · code ${short(c.headSha)}`);
+  lines.push("");
+  lines.push(
+    `${"Harness".padEnd(11)}previous ${short(c.previous.harnessSha)} → candidate ${short(c.candidate.harnessSha)}`,
+  );
+  lines.push(`${"Model".padEnd(11)}${models(c)}`);
+  lines.push(`${"Runs".padEnd(11)}${c.previous.runId} → ${c.candidate.runId}`);
+
+  lines.push("");
+  lines.push(NOISE_LINE);
+  for (const warning of c.warnings) lines.push(`warning: ${warning}`);
+
+  lines.push("");
+  const cells = c.rows.map((row) => [
+    row.label,
+    row.previous,
+    `→ ${row.candidate}`,
+    row.delta,
+    row.classification,
+    row.note ?? "",
+  ]);
+  const widths = cells[0]?.map((_, i) => Math.max(...cells.map((row) => row[i]?.length ?? 0))) ?? [];
+  for (const row of cells) {
+    lines.push(
+      row
+        .map((cell, i) => (i === row.length - 1 ? cell : cell.padEnd(widths[i] ?? 0)))
+        .join("  ")
+        .trimEnd(),
+    );
+  }
+  return lines.join("\n");
+}
+
+/** Pipes and newlines would break the table; nothing else in a cell needs escaping. */
+function cell(text: string): string {
+  return text.replace(/\|/g, "\\|").replace(/\n/g, " ");
+}
+
+/** The same table as GitHub-flavoured markdown, self-contained enough to be a PR comment. */
+export function formatComparisonMarkdown(c: Comparison): string {
+  const lines: string[] = [];
+  lines.push(`### harnessbench: \`${c.fixture}\``);
+  lines.push("");
+  lines.push(
+    `Harness \`previous\` ${short(c.previous.harnessSha)} → \`candidate\` ${short(c.candidate.harnessSha)}, ` +
+      `both on code ${short(c.headSha)}. Model: ${models(c)}. ` +
+      `Runs \`${c.previous.runId}\` and \`${c.candidate.runId}\`.`,
+  );
+  lines.push("");
+  lines.push(`_${NOISE_LINE}_`);
+  if (c.warnings.length > 0) {
+    lines.push("");
+    for (const warning of c.warnings) lines.push(`> **warning:** ${cell(warning)}`);
+  }
+  lines.push("");
+  lines.push("| Criterion | Previous | Candidate | Delta | Result | Note |");
+  lines.push("|---|---|---|---|---|---|");
+  for (const row of c.rows) {
+    const cells = [row.label, row.previous, row.candidate, row.delta, row.classification, row.note ?? ""];
+    lines.push(`| ${cells.map(cell).join(" | ")} |`);
+  }
   return lines.join("\n");
 }

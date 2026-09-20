@@ -32,7 +32,7 @@ These benchmarks cost real tokens to run. A degraded harness costs more, because
 3. An **agent adapter** runs each fixture in each environment inside a disposable workspace and records what happened: the diff, the transcript, tokens, cost, tool calls, time. Claude Code first; Codex, Aider, Gemini CLI, OpenCode and Pi to follow.
 4. A **thin mechanical layer** checks the hard facts: does your test suite still pass, how big is the diff, what did the agent spend (tokens, cost, time, tool calls).
 5. **AI judges** decide everything that can't be measured mechanically — engineering quality, scope discipline, maintainability, test intent, reasoning efficiency — by comparing the `previous` and `candidate` results side by side, blind to which is which.
-6. The report is a table of **deltas**, one row per criterion. Improvements and regressions are both visible. A composite score exists for CI gating, but never hides the individual rows.
+6. The report is a table of **deltas**, one row per criterion: `compare` turns the two runs into it, and `run` prints it as soon as both sides are in. Improvements and regressions are both visible, and a delta below the noise threshold is reported as unchanged rather than dressed up as signal. Nothing rolls the rows into a score.
 
 Runs are content-addressed by fixture, base commit, harness hash, agent and model, so baseline runs are cached and a PR normally pays only for the candidate side.
 
@@ -105,16 +105,51 @@ Run dir    .harnessbench/runs/20260919-031455-ttl-cache-candidate
 Final message: Added a TTL cache and wired it into the expensive read.
 ```
 
-When both hashes are equal the harness did not change between the merge base and `HEAD`, and `run` says so before it starts: any difference between the two sides is then noise. `--json` prints both `run.json` records as one array, `--keep` leaves both workspaces on disk and prints their paths, and `--max-turns` and `--model` override the config for one run. The exit code reports the agent, not your tests: 0 when both sides completed, 2 when either timed out, 3 when either failed, 1 for anything wrong with the setup. A failing test suite is a result, recorded in `run.json`, not an error.
+After the two summaries comes the comparison, the same table `compare` prints:
+
+```
+harnessbench compare  ttl-cache · code 0655c52
+
+Harness    previous 9c21e63 → candidate 0655c52
+Model      claude-sonnet-4-5
+Runs       20260919-031455-ttl-cache-previous → 20260919-031455-ttl-cache-candidate
+
+one run per side; deltas below the noise threshold are reported as unchanged
+
+Outcome        completed  → completed        unchanged
+Tests          failed     → passed           improved
+Files changed  6          → 5          -1    unchanged  within noise
+Lines changed  412        → 219        -47%  improved
+Turns          31         → 23         -8    improved
+Tool calls     58         → 41         -17   improved
+Tool failures  4          → 2          -2    improved
+Tokens         638,000    → 432,260    -32%  improved
+Output tokens  24,000     → 18,940     -21%  improved
+Cost           $0.51      → $0.38      -25%  improved
+Duration       3m48s      → 4m12s      +11%  unchanged  within noise
+```
+
+One row per criterion, lower is better for every count, and a delta only counts as `improved` or `regressed` when it clears both a relative threshold (15%, or 20% for the diff) and a small absolute floor (so 2 → 3 turns is never a regression). Anything the reader must know before trusting the rows is printed as a `warning:` line above them: a side that did not complete (its effort rows turn `n/a`), different models, an identical harness on both sides, or two runs from different `run` invocations.
+
+When both hashes are equal the harness did not change between the merge base and `HEAD`, and `run` says so before it starts: any difference between the two sides is then noise. `--json` prints both `run.json` records and the comparison as one array, `--keep` leaves both workspaces on disk and prints their paths, and `--max-turns` and `--model` override the config for one run. The exit code reports the agent, not your tests: 0 when both sides completed, 2 when either timed out, 3 when either failed, 1 for anything wrong with the setup. A failing test suite is a result, recorded in `run.json`, not an error.
+
+To see the table again later, or for a pair of runs you name:
+
+```sh
+npx harnessbench compare --fixture ttl-cache                      # the latest run of the fixture
+npx harnessbench compare <previous-run-id> <candidate-run-id>     # any pair, in either order
+```
+
+`compare` refuses a pair that is not one `previous` and one `candidate` of the same fixture on the same `HEAD`, and says which check failed. `--markdown` prints the same table as GitHub-flavoured markdown, ready to be a PR comment; `--json` prints the comparison object. It always exits 0 after printing: it reports, it does not gate.
 
 Requires Node.js 20 or later and a git repository.
 
 ## Status
 
-Early. `init` and `run` work, three fixtures ship, and the Claude Code adapter is written and tested. `run` produces the `previous` and `candidate` sides of one fixture; nothing compares them yet, so what you get is two measured runs and their telemetry side by side. The rough order of what comes next:
+Early. `init`, `run` and `compare` work, three fixtures ship, and the Claude Code adapter is written and tested. `run` produces the `previous` and `candidate` sides of one fixture and `compare` reports the mechanical deltas between them; the judged rows are not there yet. The rough order of what comes next:
 
-1. Pairwise judge with default rubrics
-2. `compare`, Markdown report, and a GitHub Action that comments on PRs touching harness files
+1. Pairwise judge with default rubrics, adding its rows to the same table
+2. A GitHub Action that comments the markdown table on PRs touching harness files
 3. Further agent adapters
 
 If you're reading this because you have the same problem, open an issue and describe how you'd want to test your harness. Fixture design is the part where real examples help most.

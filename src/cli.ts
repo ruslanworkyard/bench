@@ -1,19 +1,23 @@
 #!/usr/bin/env node
+import { compare } from "./commands/compare.js";
 import { init } from "./commands/init.js";
 import { run } from "./commands/run.js";
 import { CliError } from "./errors.js";
 
-const VALUE_FLAGS = new Set(["base", "test", "agent", "max-turns", "model"]);
-const BOOLEAN_FLAGS = new Set(["dry-run", "json", "keep", "help"]);
+const VALUE_FLAGS = new Set(["base", "test", "agent", "max-turns", "model", "fixture"]);
+const BOOLEAN_FLAGS = new Set(["dry-run", "json", "keep", "markdown", "help"]);
 
 const HELP = `harnessbench - Regression tests for your CLAUDE.md.
 
 Usage:
   harnessbench init [options]
   harnessbench run <fixture-id> [options]
+  harnessbench compare [<previous-run-id> <candidate-run-id>] [options]
 
 run drives the fixture twice on HEAD's code: first with the harness as committed at the
-merge base with the base branch (previous), then with the harness at HEAD (candidate).
+merge base with the base branch (previous), then with the harness at HEAD (candidate),
+and ends with the comparison of the two. compare prints that table again for two run ids,
+or for the latest run of --fixture <id>.
 
 Options:
   --base <branch>   Base branch to compare against (overrides config/detection)
@@ -22,13 +26,15 @@ Options:
   --max-turns <n>   Agent turn limit for this run (run only; overrides config)
   --model <name>    Model for this run (run only; overrides config)
   --keep            Leave the run's workspace on disk (run only; path printed)
+  --fixture <id>    Compare the latest run pair of this fixture (compare only)
+  --markdown        Print the comparison as a GitHub-flavoured markdown table (compare only)
   --dry-run         Report what init would do, without writing anything
-  --json            Print the summary as one JSON object
+  --json            Print the summary as one JSON document
   -h, --help        Show this help
 
 Exit codes (run): 0 completed, 2 agent timed out, 3 agent error, 1 anything else; the
 worse of the two sides wins. A failing test suite is a result, not an error: it does not
-change the exit code.`;
+change the exit code. compare exits 0 after printing: it reports, it does not gate.`;
 
 type Flags = Record<string, string | true>;
 
@@ -113,6 +119,26 @@ async function main(argv: string[]): Promise<number> {
       json: flags["json"] === true,
     });
     return Math.max(...records.map((record) => RUN_EXIT_CODES[record.outcome]));
+  }
+  if (command === "compare") {
+    const ids = positional.slice(1);
+    if (ids.length !== 0 && ids.length !== 2) {
+      throw new CliError(`compare takes two run ids or none\n\n${HELP}`, 2);
+    }
+    if (ids.length === 0 && value(flags, "fixture") === undefined) {
+      throw new CliError(`compare needs two run ids, or --fixture <id>\n\n${HELP}`, 2);
+    }
+    if (flags["json"] === true && flags["markdown"] === true) {
+      throw new CliError("--json and --markdown are exclusive; pick one", 2);
+    }
+    compare({
+      cwd: process.cwd(),
+      runIds: ids.length === 2 ? (ids as [string, string]) : undefined,
+      fixture: value(flags, "fixture"),
+      json: flags["json"] === true,
+      markdown: flags["markdown"] === true,
+    });
+    return 0;
   }
   throw new CliError(`unknown command "${command}"\n\n${HELP}`, 2);
 }
