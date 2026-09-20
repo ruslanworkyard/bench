@@ -171,6 +171,7 @@ test("requireAgentCommand takes a path to a binary as it is, without searching P
 
 test("requireCredentials accepts any one of the agent's variables, and names them all", () => {
   assert.doesNotThrow(() => requireCredentials(claudeCode, { ANTHROPIC_AUTH_TOKEN: "t" }));
+  assert.doesNotThrow(() => requireCredentials(claudeCode, { CLAUDE_CODE_OAUTH_TOKEN: "t" }));
 
   const error = cliError(
     () => requireCredentials(claudeCode, { ANTHROPIC_API_KEY: "" }),

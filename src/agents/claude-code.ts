@@ -17,6 +17,7 @@ const MAX_STDERR_CHARS = 2000;
 const FORWARD_ENV = [
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN",
   "ANTHROPIC_BASE_URL",
   "ANTHROPIC_MODEL",
   "CLAUDE_CODE_USE_BEDROCK",
@@ -34,9 +35,11 @@ const FORWARD_ENV = [
   "NO_PROXY",
 ] as const;
 
+/** `CLAUDE_CODE_OAUTH_TOKEN` comes from `claude setup-token`: a subscription, not an API key. */
 const CREDENTIAL_ENV = [
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN",
   "CLAUDE_CODE_USE_BEDROCK",
   "CLAUDE_CODE_USE_VERTEX",
 ] as const;
