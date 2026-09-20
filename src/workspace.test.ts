@@ -1,11 +1,21 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { mkdirSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 
+import { harnessSnapshot, type HarnessSnapshot } from "./detect/harness.js";
 import { CliError } from "./errors.js";
 import { createWorkspace, withWorkspace, type Workspace } from "./workspace.js";
 
@@ -39,6 +49,44 @@ function host(commits = 1): string {
     git(root, "commit", "--quiet", "-m", `commit ${i}`);
   }
   return root;
+}
+
+function write(root: string, path: string, content: string, mode?: number): void {
+  const target = join(root, ...path.split("/"));
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, content);
+  if (mode !== undefined) chmodSync(target, mode);
+}
+
+function snapshot(root: string, ref: string): HarnessSnapshot {
+  const found = harnessSnapshot(root, ref, []);
+  assert.ok(found, `no commit at ${ref}`);
+  return found;
+}
+
+/**
+ * A host on a feature branch whose harness differs from main: CLAUDE.md edited, a hook script
+ * and a rule added, a legacy rules file removed, and one unrelated code change.
+ */
+function hostWithBranch(): { root: string; mergeBase: string } {
+  const root = host();
+  write(root, "CLAUDE.md", "# House rules\n");
+  write(root, ".claude/legacy.md", "old rule\n");
+  write(root, ".claude/hooks/lint.sh", "#!/bin/sh\necho lint\n", 0o755);
+  write(root, "src/app.txt", "code\n");
+  git(root, "add", "-A");
+  git(root, "commit", "--quiet", "-m", "harness on main");
+  const mergeBase = git(root, "rev-parse", "HEAD");
+
+  git(root, "checkout", "--quiet", "-b", "feature");
+  write(root, "CLAUDE.md", "# House rules, revised\n");
+  write(root, ".claude/rules/new.md", "new rule\n");
+  write(root, ".claude/hooks/lint.sh", "#!/bin/sh\necho lint harder\n", 0o755);
+  rmSync(join(root, ".claude", "legacy.md"));
+  write(root, "src/app.txt", "code, changed on the branch\n");
+  git(root, "add", "-A");
+  git(root, "commit", "--quiet", "-m", "harness on the branch");
+  return { root, mergeBase };
 }
 
 async function workspace(repoRoot: string, ref: string, depth?: number): Promise<Workspace> {
@@ -181,4 +229,71 @@ test("withWorkspace destroys even when fn throws", async () => {
   );
   assert.notEqual(dir, "");
   assert.equal(existsSync(dir), false);
+});
+
+test("overlayHarness puts the merge-base harness on the branch's code, touching nothing else", async () => {
+  const { root, mergeBase } = hostWithBranch();
+  const head = snapshot(root, "HEAD");
+  const previous = snapshot(root, mergeBase);
+  const hostRefs = git(root, "for-each-ref");
+  const hostStatus = git(root, "status", "--porcelain");
+  const ws = await workspace(root, "feature");
+  mkdirSync(join(ws.tree, ".harnessbench"), { recursive: true });
+  writeFileSync(join(ws.tree, ".harnessbench", "ours.txt"), "state\n");
+
+  await ws.overlayHarness(root, head, previous);
+
+  assert.equal(readFileSync(join(ws.tree, "CLAUDE.md"), "utf8"), "# House rules\n");
+  assert.equal(existsSync(join(ws.tree, ".claude", "rules")), false, "candidate-only file and its directory");
+  assert.equal(readFileSync(join(ws.tree, ".claude", "legacy.md"), "utf8"), "old rule\n");
+  assert.equal(readFileSync(join(ws.tree, ".claude", "hooks", "lint.sh"), "utf8"), "#!/bin/sh\necho lint\n");
+  assert.ok(statSync(join(ws.tree, ".claude", "hooks", "lint.sh")).mode & 0o100, "executable bit kept");
+  assert.equal(readFileSync(join(ws.tree, "src", "app.txt"), "utf8"), "code, changed on the branch\n");
+  assert.equal(readFileSync(join(ws.tree, ".harnessbench", "ours.txt"), "utf8"), "state\n");
+
+  // Untrimmed: a status code can start with a space.
+  const changed = execFileSync(
+    "git",
+    ["status", "--porcelain", "--untracked-files=all", "--", ".", ":(exclude).harnessbench"],
+    { cwd: ws.tree, env: GIT_ENV, encoding: "utf8" },
+  )
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => line.slice(3))
+    .sort();
+  assert.deepEqual(changed, [".claude/hooks/lint.sh", ".claude/legacy.md", ".claude/rules/new.md", "CLAUDE.md"]);
+
+  // The host is only read.
+  assert.equal(git(root, "for-each-ref"), hostRefs);
+  assert.equal(git(root, "status", "--porcelain"), hostStatus);
+  assert.equal(readFileSync(join(root, "CLAUDE.md"), "utf8"), "# House rules, revised\n");
+});
+
+test("overlayHarness with the same harness on both sides changes nothing", async () => {
+  const { root } = hostWithBranch();
+  const head = snapshot(root, "HEAD");
+  const ws = await workspace(root, "feature");
+
+  await ws.overlayHarness(root, head, head);
+
+  assert.equal(git(ws.tree, "status", "--porcelain"), "");
+});
+
+test("rebaseline leaves one clean commit, so diff sees only what comes after", async () => {
+  const { root, mergeBase } = hostWithBranch();
+  const ws = await workspace(root, "feature");
+  await ws.overlayHarness(root, snapshot(root, "HEAD"), snapshot(root, mergeBase));
+
+  await ws.rebaseline();
+
+  assert.equal(git(ws.tree, "status", "--porcelain"), "");
+  assert.equal(git(ws.tree, "rev-list", "--count", "HEAD"), "1");
+  assert.equal(git(ws.tree, "log", "-1", "--format=%s"), "harness on the branch");
+  assert.equal(await ws.diff(), "");
+  assert.equal(git(ws.tree, "show", "HEAD:CLAUDE.md"), "# House rules");
+
+  writeFileSync(join(ws.tree, "src", "app.txt"), "agent edit\n");
+  const diff = await ws.diff();
+  assert.match(diff, /^\+\+\+ b\/src\/app\.txt$/m);
+  assert.doesNotMatch(diff, /CLAUDE\.md/);
 });

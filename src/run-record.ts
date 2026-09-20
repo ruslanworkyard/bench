@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import type { HarnessSnapshot } from "./detect/harness.js";
 import { CliError } from "./errors.js";
 
 /**
@@ -8,10 +9,17 @@ import { CliError } from "./errors.js";
  * run only through readRunRecord, so the schema number is the one place compatibility lives.
  */
 
-export const RUN_RECORD_SCHEMA = 1;
+export const RUN_RECORD_SCHEMA = 2;
 export const RUN_RECORD_FILE = "run.json";
 
 export type RunOutcome = "completed" | "timeout" | "error";
+
+/**
+ * The two harnesses a fixture runs under, on the same code: `previous` is the harness at the
+ * merge base with the base branch, `candidate` the harness at HEAD. In running order.
+ */
+export const ENVIRONMENTS = ["previous", "candidate"] as const;
+export type Environment = (typeof ENVIRONMENTS)[number];
 
 export type TestResult = {
   command: string;
@@ -25,9 +33,12 @@ export type RunRecord = {
   schema: typeof RUN_RECORD_SCHEMA;
   runId: string;
   fixture: string;
-  environment: "candidate";
+  environment: Environment;
+  /** The code both environments run on. */
   headSha: string;
   baseBranch: string;
+  /** The harness this run used: which commit it came from, and which files. */
+  harness: HarnessSnapshot;
   /** `model` is what actually ran, as the agent reported it; null when it did not say. */
   agent: { name: string; command: string; model: string | null };
   outcome: RunOutcome;

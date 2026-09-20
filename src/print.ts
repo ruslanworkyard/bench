@@ -105,6 +105,15 @@ export function formatDirtyHarness(paths: string[]): string {
   return lines.join("\n");
 }
 
+/** The warning `run` prints when both sides would use the same harness: any delta is noise. */
+export function formatSameHarness(sha: string): string {
+  return [
+    `! the harness is identical at HEAD and at the merge base (${sha.slice(0, 7)}):`,
+    "! previous and candidate will run the same harness, so any difference",
+    "! between them is noise, not the effect of a change",
+  ].join("\n");
+}
+
 const STDERR_TAIL_LINES = 5;
 const FINAL_MESSAGE_LINES = 3;
 
@@ -141,7 +150,10 @@ function lastLines(text: string, n: number): string[] {
 export function formatRun(record: RunRecord, agentStderrPath: string): string {
   const lines: string[] = [];
   const when = record.outcome === "completed" ? "in" : "after";
-  lines.push(`harnessbench run  ${record.fixture}  → ${record.outcome} ${when} ${duration(record.durationMs)}`);
+  lines.push(
+    `harnessbench run  ${record.fixture} · ${record.environment}  → ` +
+      `${record.outcome} ${when} ${duration(record.durationMs)}`,
+  );
 
   const calls = Object.entries(record.toolCalls);
   const total = calls.reduce((sum, [, n]) => sum + n, 0);
@@ -149,6 +161,11 @@ export function formatRun(record: RunRecord, agentStderrPath: string): string {
   const { tokens } = record;
 
   lines.push("");
+  const { harness } = record;
+  lines.push(
+    `${"Harness".padEnd(11)}${plural(harness.files.length, "file")} at ${harness.sha.slice(0, 7)} ` +
+      `(${harness.ref === harness.sha ? "merge base" : harness.ref}) · hash ${harness.hash.slice(0, 12)}`,
+  );
   lines.push(`${"Agent".padEnd(11)}${record.agent.name} · ${record.agent.model ?? "model not reported"}`);
   lines.push(
     `${"Turns".padEnd(11)}${String(record.turns).padEnd(5)}Tool calls  ${total}${byTool}   ` +
