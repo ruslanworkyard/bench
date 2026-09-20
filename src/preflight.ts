@@ -5,7 +5,8 @@ import { getAdapter } from "./agents/index.js";
 import type { AgentAdapter } from "./agents/types.js";
 import { CONFIG_FILE, FIXTURES_DIR, load, type AgentConfig, type Config } from "./config.js";
 import { agentPath, isExecutable } from "./detect/agents.js";
-import { git, repoRoot } from "./detect/git.js";
+import { git, mergeBase, repoRoot } from "./detect/git.js";
+import { harnessSnapshot, type HarnessSnapshot } from "./detect/harness.js";
 import { CliError } from "./errors.js";
 import { listFixtures, validateFixture, type FixtureMeta } from "./fixtures.js";
 
@@ -49,6 +50,32 @@ export function requireBaseBranch(root: string, branch: string): string {
     );
   }
   return sha;
+}
+
+/** The commit whose harness is `previous`: where the base branch and HEAD last agreed. */
+export function requireMergeBase(root: string, branch: string): string {
+  const sha = mergeBase(root, branch);
+  if (sha === null) {
+    throw new CliError(
+      `no merge base between '${branch}' and HEAD - fetch the full history ` +
+        `(git fetch --unshallow) or set --base to a branch this one was cut from`,
+      1,
+    );
+  }
+  return sha;
+}
+
+/** The harness as committed at `ref`; `ref` has already been checked to be a commit. */
+export function requireHarnessSnapshot(
+  root: string,
+  ref: string,
+  extraPaths: readonly string[],
+): HarnessSnapshot {
+  const snapshot = harnessSnapshot(root, ref, extraPaths);
+  if (snapshot === null) {
+    throw new CliError(`'${ref}' is not a commit in this repository`, 1);
+  }
+  return snapshot;
 }
 
 export function requireAgent(name: string): AgentAdapter {

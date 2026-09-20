@@ -1,9 +1,9 @@
 import { createWriteStream, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import type { AgentResult } from "../agents/types.js";
-import { RUNS_DIR } from "../config.js";
-import { dirtyHarnessFiles, harnessFiles } from "../detect/harness.js";
+import type { AgentAdapter, AgentResult } from "../agents/types.js";
+import { RUNS_DIR, type AgentConfig } from "../config.js";
+import { dirtyHarnessFiles, harnessFiles, type HarnessSnapshot } from "../detect/harness.js";
 import {
   requireAgent,
   requireAgentCommand,
@@ -12,10 +12,19 @@ import {
   requireCredentials,
   requireFixture,
   requireGit,
+  requireHarnessSnapshot,
+  requireMergeBase,
   requireRepo,
+  type LoadedFixture,
 } from "../preflight.js";
-import { formatDirtyHarness, formatRun } from "../print.js";
-import { writeRunRecord, type RunRecord, type TestResult } from "../run-record.js";
+import { formatDirtyHarness, formatRun, formatSameHarness } from "../print.js";
+import {
+  ENVIRONMENTS,
+  writeRunRecord,
+  type Environment,
+  type RunRecord,
+  type TestResult,
+} from "../run-record.js";
 import { withWorkspace, type Workspace } from "../workspace.js";
 
 export type RunOptions = {
@@ -30,20 +39,39 @@ export type RunOptions = {
   json: boolean;
 };
 
-/** The only environment there is until `previous` arrives; the run id carries it already. */
-const ENVIRONMENT = "candidate";
-
 /** A test suite that has not finished in this long is not going to. */
 const TEST_TIMEOUT_MS = 10 * 60_000;
 
-/** Runs one fixture against the current HEAD, records everything, prints a summary. */
-export async function run(options: RunOptions): Promise<RunRecord> {
+/** Everything one side of a run needs that the other side shares. */
+type Side = {
+  root: string;
+  runId: string;
+  environment: Environment;
+  /** The harness this side runs with; `head` is what the clone starts out with. */
+  harness: HarnessSnapshot;
+  head: HarnessSnapshot;
+  baseBranch: string;
+  fixture: LoadedFixture;
+  adapter: AgentAdapter;
+  agentConfig: AgentConfig;
+  agentPath: string;
+  testCommand: string;
+  keep: boolean;
+};
+
+/**
+ * Runs one fixture twice on the code at HEAD: with the harness at the merge base with the
+ * base branch (`previous`), then with the harness at HEAD (`candidate`). Each side gets its
+ * own workspace and run directory; both are recorded and summarised, in that order.
+ */
+export async function run(options: RunOptions): Promise<RunRecord[]> {
   requireGit();
   const root = requireRepo(options.cwd);
   const config = requireConfig(root);
 
   const baseBranch = options.base ?? config.baseBranch;
   requireBaseBranch(root, baseBranch);
+  const mergeBase = requireMergeBase(root, baseBranch);
   const agentConfig = {
     ...config.agent,
     name: options.agent ?? config.agent.name,
@@ -53,31 +81,67 @@ export async function run(options: RunOptions): Promise<RunRecord> {
   const adapter = requireAgent(agentConfig.name);
   const agentPath = requireAgentCommand(adapter, agentConfig);
   requireCredentials(adapter);
-  const { fixture, prompt } = requireFixture(root, options.fixtureId);
+  const fixture = requireFixture(root, options.fixtureId);
 
-  const harness = [
-    ...new Set([
-      ...harnessFiles(root).map((entry) => entry.path),
-      ...config.harness.extraPaths,
-    ]),
+  const head = requireHarnessSnapshot(root, "HEAD", config.harness.extraPaths);
+  const previous = requireHarnessSnapshot(root, mergeBase, config.harness.extraPaths);
+
+  // The working tree, not HEAD: an untracked new harness file is exactly what to warn about.
+  const onDisk = [
+    ...new Set([...harnessFiles(root).map((entry) => entry.path), ...config.harness.extraPaths]),
   ];
-  const dirty = dirtyHarnessFiles(root, harness);
+  const dirty = dirtyHarnessFiles(root, onDisk);
   if (dirty.length > 0) console.error(formatDirtyHarness(dirty));
+  if (head.hash === previous.hash) console.error(formatSameHarness(mergeBase));
 
-  const runId = `${timestamp(new Date())}-${fixture.id}-${ENVIRONMENT}`;
-  const runDir = join(root, RUNS_DIR, runId);
+  // One timestamp for both sides, so the two run ids differ only in their environment.
+  const stamp = timestamp(new Date());
+  const shared = {
+    root,
+    head,
+    baseBranch,
+    fixture,
+    adapter,
+    agentConfig,
+    agentPath,
+    testCommand: config.testCommand,
+    keep: options.keep,
+  };
+  const records: RunRecord[] = [];
+  const summaries: string[] = [];
+  for (const environment of ENVIRONMENTS) {
+    const runId = `${stamp}-${fixture.fixture.id}-${environment}`;
+    const harness = environment === "previous" ? previous : head;
+    const { record, stderrPath } = await runSide({ ...shared, runId, environment, harness });
+    records.push(record);
+    summaries.push(formatRun(record, stderrPath));
+  }
+
+  if (options.json) console.log(JSON.stringify(records, null, 2));
+  else console.log(summaries.join("\n\n"));
+  return records;
+}
+
+/** One environment: its workspace, the agent, the diff, the tests, and its run directory. */
+async function runSide(side: Side): Promise<{ record: RunRecord; stderrPath: string }> {
+  const runDir = join(side.root, RUNS_DIR, side.runId);
   // Before the agent starts, so a crash mid-run still leaves the raw stream behind.
   mkdirSync(runDir, { recursive: true });
   const stderrPath = join(runDir, "agent.stderr.log");
 
   const record = await withWorkspace(
-    { repoRoot: root, ref: "HEAD", runId, keep: options.keep },
+    { repoRoot: side.root, ref: "HEAD", runId: side.runId, keep: side.keep },
     async (ws) => {
+      if (side.environment === "previous") {
+        await ws.overlayHarness(side.root, side.head, side.harness);
+        await ws.rebaseline();
+      }
+
       const startedAt = new Date();
-      const result = await adapter.run({
+      const result = await side.adapter.run({
         workspace: ws,
-        prompt,
-        config: agentConfig,
+        prompt: side.fixture.prompt,
+        config: side.agentConfig,
         rawOutputPath: join(runDir, "raw.jsonl"),
         stderrPath,
       });
@@ -86,9 +150,7 @@ export async function run(options: RunOptions): Promise<RunRecord> {
       writeFileSync(join(runDir, "diff.patch"), diff, "utf8");
 
       const tests =
-        config.testCommand === ""
-          ? null
-          : await runTests(ws, config.testCommand, join(runDir, "test.log"));
+        side.testCommand === "" ? null : await runTests(ws, side.testCommand, join(runDir, "test.log"));
 
       const transcript = result.transcript.map((event) => JSON.stringify(event));
       writeFileSync(
@@ -98,13 +160,14 @@ export async function run(options: RunOptions): Promise<RunRecord> {
       );
 
       const finished: RunRecord = {
-        schema: 1,
-        runId,
-        fixture: fixture.id,
-        environment: ENVIRONMENT,
+        schema: 2,
+        runId: side.runId,
+        fixture: side.fixture.fixture.id,
+        environment: side.environment,
         headSha: ws.headSha,
-        baseBranch,
-        agent: { name: adapter.name, command: agentPath, model: result.model },
+        baseBranch: side.baseBranch,
+        harness: side.harness,
+        agent: { name: side.adapter.name, command: side.agentPath, model: result.model },
         outcome: result.outcome,
         exitCode: result.exitCode,
         startedAt: startedAt.toISOString(),
@@ -118,10 +181,7 @@ export async function run(options: RunOptions): Promise<RunRecord> {
       return finished;
     },
   );
-
-  if (options.json) console.log(JSON.stringify(record, null, 2));
-  else console.log(formatRun(record, stderrPath));
-  return record;
+  return { record, stderrPath };
 }
 
 function telemetry(result: AgentResult) {

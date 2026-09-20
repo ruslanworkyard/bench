@@ -81,11 +81,19 @@ Then run a fixture:
 npx harnessbench run ttl-cache
 ```
 
-`run` clones the current `HEAD` into a disposable workspace, hands the fixture's prompt to the agent there, captures the diff, runs your test command against the result, and writes everything to `.harnessbench/runs/<timestamp>-<fixture>-candidate/`: the agent's raw output stream, a normalised `transcript.jsonl`, `diff.patch`, `test.log`, `agent.stderr.log` and a `run.json` with the outcome, telemetry and test result. It then prints a one-screen summary:
+`run` drives the fixture twice on the same code, the current `HEAD`: once as `previous`, with the harness files as they were committed at the merge base of your branch and the base branch, and once as `candidate`, with the harness at `HEAD`. Each side gets a disposable shallow clone (for `previous`, the merge-base harness is overlaid on top and folded into the clone's single commit, so the agent sees an ordinary checkout), the fixture's prompt is handed to the agent there, the diff is captured, your test command runs against the result, and everything lands in `.harnessbench/runs/<timestamp>-<fixture>-<environment>/`: the agent's raw output stream, a normalised `transcript.jsonl`, `diff.patch`, `test.log`, `agent.stderr.log` and a `run.json` with the outcome, telemetry, test result and a hash of the harness that ran. It then prints one summary per side:
 
 ```
-harnessbench run  ttl-cache  → completed in 4m12s
+harnessbench run  ttl-cache · previous  → completed in 3m48s
 
+Harness    2 files at 9c21e63 (merge base) · hash 87329bfeb114
+Agent      claude-code · claude-sonnet-4-5
+Turns      31   Tool calls  58 (Read 24, Edit 14, Bash 20)   Tool failures 4
+...
+
+harnessbench run  ttl-cache · candidate  → completed in 4m12s
+
+Harness    2 files at 0655c52 (HEAD) · hash fde8ac86d613
 Agent      claude-code · claude-sonnet-4-5
 Turns      23   Tool calls  41 (Read 18, Edit 9, Bash 14)   Tool failures 2
 Tokens     in 1,203  out 18,940  cache read 402,113  cache write 10,004
@@ -97,18 +105,17 @@ Run dir    .harnessbench/runs/20260919-031455-ttl-cache-candidate
 Final message: Added a TTL cache and wired it into the expensive read.
 ```
 
-`--json` prints `run.json` instead, `--keep` leaves the workspace on disk and prints its path, and `--max-turns` and `--model` override the config for one run. The exit code reports the agent, not your tests: 0 when it completed, 2 when it timed out, 3 when it failed, 1 for anything wrong with the setup. A failing test suite is a result, recorded in `run.json`, not an error.
+When both hashes are equal the harness did not change between the merge base and `HEAD`, and `run` says so before it starts: any difference between the two sides is then noise. `--json` prints both `run.json` records as one array, `--keep` leaves both workspaces on disk and prints their paths, and `--max-turns` and `--model` override the config for one run. The exit code reports the agent, not your tests: 0 when both sides completed, 2 when either timed out, 3 when either failed, 1 for anything wrong with the setup. A failing test suite is a result, recorded in `run.json`, not an error.
 
 Requires Node.js 20 or later and a git repository.
 
 ## Status
 
-Early. `init` and `run` work, three fixtures ship, and the Claude Code adapter is written and tested. Every run is a `candidate` run for now: there is no `previous` side to compare against yet, so what you get is one measured run per fixture. The rough order of what comes next:
+Early. `init` and `run` work, three fixtures ship, and the Claude Code adapter is written and tested. `run` produces the `previous` and `candidate` sides of one fixture; nothing compares them yet, so what you get is two measured runs and their telemetry side by side. The rough order of what comes next:
 
-1. Harness overlay: `previous` vs `candidate` for the same fixture
-2. Pairwise judge with default rubrics
-3. `compare`, Markdown report, and a GitHub Action that comments on PRs touching harness files
-4. Further agent adapters
+1. Pairwise judge with default rubrics
+2. `compare`, Markdown report, and a GitHub Action that comments on PRs touching harness files
+3. Further agent adapters
 
 If you're reading this because you have the same problem, open an issue and describe how you'd want to test your harness. Fixture design is the part where real examples help most.
 

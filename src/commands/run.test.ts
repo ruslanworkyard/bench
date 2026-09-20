@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 
 import { CONFIG_FILE, RUNS_DIR, type AgentConfig, type Config } from "../config.js";
-import { readRunRecord, type RunRecord } from "../run-record.js";
+import { readRunRecord, type Environment, type RunRecord } from "../run-record.js";
 
 /**
  * The real `claude` is never run here. A recorded stream is replayed by a shell script
@@ -80,8 +80,8 @@ function withoutCredentials(): NodeJS.ProcessEnv {
   return env;
 }
 
-function git(root: string, ...args: string[]): void {
-  execFileSync("git", args, { cwd: root, env: ENV, stdio: "ignore" });
+function git(root: string, ...args: string[]): string {
+  return execFileSync("git", args, { cwd: root, env: ENV, encoding: "utf8" }).trim();
 }
 
 type Outcome = { status: number; stdout: string; stderr: string };
@@ -137,12 +137,39 @@ function repoWithFake(fake: string, patch: ConfigPatch = {}): string {
   return root;
 }
 
-/** The one run directory a fresh repository has after one run. */
-function runDir(root: string): string {
+/**
+ * A repository on a feature branch whose harness differs from main's: CLAUDE.md revised, a
+ * rule added, and one code file changed. Returns the sha of the merge base with main.
+ */
+function repoOnBranch(fake = "fake-claude.sh"): { root: string; mergeBase: string } {
+  const root = repoWithFake(fake);
+  const mergeBase = git(root, "rev-parse", "HEAD");
+  git(root, "checkout", "--quiet", "-b", "feature");
+  writeFileSync(join(root, "CLAUDE.md"), "# House rules, revised\n", "utf8");
+  execFileSync("mkdir", ["-p", join(root, ".claude")]);
+  writeFileSync(join(root, ".claude", "rules.md"), "new rule\n", "utf8");
+  writeFileSync(join(root, "code.txt"), "changed on the branch\n", "utf8");
+  git(root, "add", "-A");
+  git(root, "commit", "--quiet", "-m", "revise the harness");
+  return { root, mergeBase };
+}
+
+/** The two run directories a fresh repository has after one run, by environment. */
+function runDirs(root: string): Record<Environment, string> {
   const runs = join(root, RUNS_DIR);
-  const entries = execFileSync("ls", [runs], { encoding: "utf8" }).trim().split("\n");
-  assert.equal(entries.length, 1, `expected one run in ${runs}, found ${entries.join(", ")}`);
-  return join(runs, entries[0] as string);
+  const entries = execFileSync("ls", [runs], { encoding: "utf8" }).trim().split("\n").sort();
+  assert.equal(entries.length, 2, `expected two runs in ${runs}, found ${entries.join(", ")}`);
+  const [candidate, previous] = entries as [string, string];
+  assert.match(previous, /-previous$/);
+  assert.match(candidate, /-candidate$/);
+  // Same timestamp: the ids differ only in their environment.
+  assert.equal(previous.replace(/-previous$/, ""), candidate.replace(/-candidate$/, ""));
+  return { previous: join(runs, previous), candidate: join(runs, candidate) };
+}
+
+/** The candidate side's run directory. */
+function runDir(root: string): string {
+  return runDirs(root).candidate;
 }
 
 function fails(cwd: string, ...args: string[]): Outcome {
@@ -159,15 +186,18 @@ after(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true });
 });
 
-test("run drives the agent in a workspace and leaves a complete run directory", () => {
+test("run drives the agent in a workspace, once per environment, and leaves complete run directories", () => {
   const root = repoWithFake("fake-claude.sh");
 
   const { stdout, stderr } = ok(root, "run", "ttl-cache");
 
-  const dir = runDir(root);
+  const dirs = runDirs(root);
+  const dir = dirs.candidate;
   assert.match(dir, /\/\d{8}-\d{6}-ttl-cache-candidate$/);
-  for (const file of ["raw.jsonl", "diff.patch", "test.log", "transcript.jsonl", "run.json", "agent.stderr.log"]) {
-    assert.ok(existsSync(join(dir, file)), `${file} missing from ${dir}`);
+  for (const side of Object.values(dirs)) {
+    for (const file of ["raw.jsonl", "diff.patch", "test.log", "transcript.jsonl", "run.json", "agent.stderr.log"]) {
+      assert.ok(existsSync(join(side, file)), `${file} missing from ${side}`);
+    }
   }
 
   const record: RunRecord = readRunRecord(dir);
@@ -176,6 +206,19 @@ test("run drives the agent in a workspace and leaves a complete run directory", 
   assert.equal(record.environment, "candidate");
   assert.equal(record.baseBranch, "main");
   assert.match(record.headSha, /^[0-9a-f]{40}$/);
+  assert.deepEqual(record.harness.files, ["CLAUDE.md"]);
+  assert.equal(record.harness.ref, "HEAD");
+  assert.equal(record.harness.sha, record.headSha);
+  assert.match(record.harness.hash, /^[0-9a-f]{64}$/);
+
+  // On main itself the merge base is HEAD: the previous side ran the very same harness.
+  const previous = readRunRecord(dirs.previous);
+  assert.equal(previous.environment, "previous");
+  assert.equal(previous.outcome, "completed");
+  assert.equal(previous.headSha, record.headSha);
+  assert.equal(previous.harness.ref, record.headSha);
+  assert.equal(previous.harness.hash, record.harness.hash);
+  assert.match(stderr, /harness is identical at HEAD and at the merge base/);
   assert.equal(record.agent.name, AGENT);
   assert.equal(record.agent.command, fixture("fake-claude.sh"));
   assert.equal(record.agent.model, "claude-opus-5"); // From the recording, not the config.
@@ -208,16 +251,75 @@ test("run drives the agent in a workspace and leaves a complete run directory", 
   assert.match(readFileSync(`${ENV["FAKE_CLAUDE_DUMP"]}.stdin`, "utf8"), /time-to-live/);
   assert.equal(existsSync(join(root, "agent-was-here.txt")), false);
 
-  assert.match(stdout, /harnessbench run {2}ttl-cache\s+→ completed in /);
+  assert.match(stdout, /harnessbench run {2}ttl-cache · previous {2}→ completed in /);
+  assert.match(stdout, /harnessbench run {2}ttl-cache · candidate {2}→ completed in /);
+  assert.match(stdout, /Harness\s+1 file at [0-9a-f]{7} \(HEAD\) · hash [0-9a-f]{12}/);
+  assert.match(stdout, /Harness\s+1 file at [0-9a-f]{7} \(merge base\) · hash [0-9a-f]{12}/);
   assert.match(stdout, new RegExp(`Agent\\s+${AGENT} · claude-opus-5`));
   assert.match(stdout, /Turns\s+7\s+Tool calls\s+2 \(Read 1, Bash 1\)\s+Tool failures 1/);
   assert.match(stdout, /Tokens\s+in 12\s+out 345\s+cache read 6,789\s+cache write 1,011/);
   assert.match(stdout, /Cost\s+\$0\.42/);
   assert.match(stdout, /Changes\s+1 file, \+1 \/ -0/);
   assert.match(stdout, /Tests\s+echo tests ok → passed in /);
+  assert.match(stdout, new RegExp(`Run dir\\s+${RUNS_DIR}/\\d{8}-\\d{6}-ttl-cache-previous`));
   assert.match(stdout, new RegExp(`Run dir\\s+${RUNS_DIR}/\\d{8}-\\d{6}-ttl-cache-candidate`));
   assert.match(stdout, /Final message: Added a TTL cache and wired it into the expensive read\./);
   assert.doesNotMatch(stderr, /workspace kept/);
+});
+
+test("on a branch, the previous side runs the merge-base harness on the branch's code", () => {
+  const { root, mergeBase } = repoOnBranch();
+  const head = git(root, "rev-parse", "HEAD");
+
+  const { stderr } = ok(root, "run", "ttl-cache", "--keep");
+
+  assert.doesNotMatch(stderr, /harness is identical/);
+  const dirs = runDirs(root);
+  const previous = readRunRecord(dirs.previous);
+  const candidate = readRunRecord(dirs.candidate);
+
+  // Same code, different harness.
+  assert.equal(previous.headSha, head);
+  assert.equal(candidate.headSha, head);
+  assert.equal(previous.harness.sha, mergeBase);
+  assert.equal(candidate.harness.sha, head);
+  assert.deepEqual(previous.harness.files, ["CLAUDE.md"]);
+  assert.deepEqual(candidate.harness.files, [".claude/rules.md", "CLAUDE.md"]);
+  assert.notEqual(previous.harness.hash, candidate.harness.hash);
+
+  // What each side's agent actually saw, in the workspaces --keep left behind.
+  const kept = [...stderr.matchAll(/^workspace kept at (.+)$/gm)].map((match) => match[1] as string);
+  assert.equal(kept.length, 2, stderr);
+  const [previousTree, candidateTree] = kept.map((dir) => join(dir, "tree")) as [string, string];
+  assert.equal(readFileSync(join(previousTree, "CLAUDE.md"), "utf8"), "# House rules\n");
+  assert.equal(existsSync(join(previousTree, ".claude")), false);
+  assert.equal(readFileSync(join(previousTree, "code.txt"), "utf8"), "changed on the branch\n");
+  assert.equal(readFileSync(join(candidateTree, "CLAUDE.md"), "utf8"), "# House rules, revised\n");
+  assert.equal(readFileSync(join(candidateTree, ".claude", "rules.md"), "utf8"), "new rule\n");
+  for (const dir of kept) rmSync(dir, { recursive: true, force: true });
+
+  // The overlay is not part of the previous side's diff: only the agent's work is.
+  for (const side of [previous, candidate]) {
+    assert.deepEqual(side.diff, { files: 1, added: 1, removed: 0 });
+  }
+  assert.doesNotMatch(readFileSync(join(dirs.previous, "diff.patch"), "utf8"), /CLAUDE\.md/);
+
+  // The host repository is exactly as it was.
+  assert.equal(git(root, "rev-parse", "HEAD"), head);
+  assert.equal(git(root, "status", "--porcelain"), "");
+  assert.equal(readFileSync(join(root, "CLAUDE.md"), "utf8"), "# House rules, revised\n");
+});
+
+test("a branch with no merge base is refused with a fix", () => {
+  const root = repoWithFake("fake-claude.sh");
+  git(root, "checkout", "--quiet", "--orphan", "rewrite");
+  git(root, "commit", "--quiet", "-m", "unrelated history");
+
+  const { status, stderr } = fails(root, "run", "ttl-cache");
+
+  assert.equal(status, 1);
+  assert.match(stderr, /no merge base between 'main' and HEAD/);
+  assert.equal(existsSync(join(root, RUNS_DIR)), false);
 });
 
 test("a failing test command is a result, not a failure of the run", () => {
@@ -249,10 +351,13 @@ test("an agent that hangs is a timeout: exit 2, and the record is still written"
   const { status, stdout } = cli(root, "run", "ttl-cache");
 
   assert.equal(status, 2);
-  const record = readRunRecord(runDir(root));
-  assert.equal(record.outcome, "timeout");
-  assert.equal(record.exitCode, null);
-  assert.match(stdout, /→ timeout after /);
+  for (const dir of Object.values(runDirs(root))) {
+    const record = readRunRecord(dir);
+    assert.equal(record.outcome, "timeout");
+    assert.equal(record.exitCode, null);
+  }
+  assert.match(stdout, /previous {2}→ timeout after /);
+  assert.match(stdout, /candidate {2}→ timeout after /);
 });
 
 test("an agent that cannot start is an error: exit 3, explained by its stderr", () => {
@@ -271,26 +376,32 @@ test("an agent that cannot start is an error: exit 3, explained by its stderr", 
 test("--keep leaves the workspace behind and says where; without it the workspace is gone", () => {
   const kept = repoWithFake("fake-claude.sh");
   const { stderr } = ok(kept, "run", "ttl-cache", "--keep");
-  const match = /^workspace kept at (.+)$/m.exec(stderr);
-  assert.ok(match, stderr);
-  const workspace = match[1] as string;
-  assert.ok(existsSync(join(workspace, "tree", "agent-was-here.txt")), workspace);
-  assert.ok(workspace.endsWith(readRunRecord(runDir(kept)).runId));
-  // Run ids have one-second resolution: a kept workspace would collide with the next run.
-  rmSync(workspace, { recursive: true, force: true });
+  const workspaces = [...stderr.matchAll(/^workspace kept at (.+)$/gm)].map((match) => match[1] as string);
+  assert.equal(workspaces.length, 2, stderr);
+  const dirs = runDirs(kept);
+  for (const [i, environment] of (["previous", "candidate"] as const).entries()) {
+    const workspace = workspaces[i] as string;
+    assert.ok(existsSync(join(workspace, "tree", "agent-was-here.txt")), workspace);
+    assert.ok(workspace.endsWith(readRunRecord(dirs[environment]).runId), workspace);
+    // Run ids have one-second resolution: a kept workspace would collide with the next run.
+    rmSync(workspace, { recursive: true, force: true });
+  }
 
   const dropped = repoWithFake("fake-claude.sh");
   ok(dropped, "run", "ttl-cache");
-  const runId = readRunRecord(runDir(dropped)).runId;
-  assert.equal(existsSync(join(realpathSync(tmpdir()), "harnessbench", runId)), false);
+  for (const dir of Object.values(runDirs(dropped))) {
+    const runId = readRunRecord(dir).runId;
+    assert.equal(existsSync(join(realpathSync(tmpdir()), "harnessbench", runId)), false);
+  }
 });
 
-test("--json prints run.json instead of the summary", () => {
+test("--json prints both run.json records, previous first, instead of the summary", () => {
   const root = repoWithFake("fake-claude.sh");
 
   const { stdout } = ok(root, "run", "ttl-cache", "--json");
 
-  assert.deepEqual(JSON.parse(stdout), readRunRecord(runDir(root)));
+  const dirs = runDirs(root);
+  assert.deepEqual(JSON.parse(stdout), [readRunRecord(dirs.previous), readRunRecord(dirs.candidate)]);
   assert.doesNotMatch(stdout, /Tool calls/);
 });
 

@@ -80,8 +80,11 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
 - `config.ts` — `Config` type (including the `agent` block), defaults, load/validate. Unknown
   keys at any level are an error naming the key: a typo is otherwise a silently ignored setting.
 - `fixtures.ts` — locate packaged fixtures via `import.meta.url`, copy into the host.
-- `workspace.ts` — a throwaway clone of the host + an isolated HOME, for one run.
-- `run-record.ts` — `RunRecord` (`run.json`, `schema: 1`), `writeRunRecord`, `readRunRecord`.
+- `workspace.ts` — a throwaway clone of the host + an isolated HOME, for one run; also the
+  harness overlay (`overlayHarness`) and `rebaseline`, which folds the overlay into the clone's
+  single commit so the agent sees a plain checkout and `diff()` measures only the agent's work.
+- `run-record.ts` — `RunRecord` (`run.json`, `schema: 2`), `Environment`, `writeRunRecord`,
+  `readRunRecord`.
   Later commands (compare, judge) read a run only through `readRunRecord`, which rejects any
   other schema number; that is the one place run-file compatibility lives.
 - `errors.ts` — `CliError`, the shared vocabulary at the bottom of the graph.
@@ -104,8 +107,8 @@ consistently actionable.
 Split triggers (do not pre-empt them):
 - `runtime/` — this one fired, as `agents/`: the agent runner is a folder because it has an
   interface (`types.ts`), a registry (`index.ts`) and one file per agent. The harness overlay
-  and the judge are the next candidates for siblings of `workspace.ts`; give them a folder only
-  when each has more than one file.
+  turned out to be two methods on `Workspace`, not a sibling. The judge is the next candidate;
+  give it a folder only when it has more than one file.
 - `print/init.ts` + `print/run.ts` + `print/format.ts` when a third command formats output. The
   data shape `Report` moves to the file that produces it (`RunRecord` already lives in
   `run-record.ts`); `print.ts` keeps the
@@ -166,17 +169,42 @@ a fake shell script stands in, so the suite is free, offline and deterministic.
   Not yet done: one real run with a real key (`npx . run ttl-cache --max-turns 20 --keep`) and
   reading its `run.json`, `diff.patch`, `transcript.jsonl` by hand.
 
+- Both environments (2026-09-20). `run <fixture>` now runs `previous` then `candidate`,
+  sequentially, each in its own workspace and run directory; the two ids share one timestamp
+  and differ only in the suffix. `previous` = the harness as committed at
+  `git merge-base <base> HEAD`, on HEAD's code; no merge base (orphan branch, shallow host) is
+  a preflight error naming `--base` and `git fetch --unshallow`.
+  - `detect/harness.ts` reads through a `FileSource` (`list()`/`read()`): the working-tree
+    walk, or `gitSource(root, ref)` on `git ls-tree -r -z` + `git show ref:path`. Both count
+    only regular files (a symlinked `CLAUDE.md` is not harness on either side) and skip
+    `.harnessbench/`, `.git/`, `node_modules/`. `harnessSnapshot(root, ref, extraPaths)` gives
+    `{ref, sha, files, hash}`; hash = sha256 over `path\0contents\0` in sorted order, so equal
+    hashes mean byte-identical harnesses. `extraPaths` may be files or directories; missing
+    ones are skipped.
+  - `Workspace.overlayHarness(repoRoot, head, previous)` deletes every HEAD harness path from
+    the tree (pruning emptied directories), then writes each previous file from the host with
+    `git show <sha>:<path>` plus the mode from one `git ls-tree`. The clone is depth 1, so the
+    host is the only source; nothing is written to it. `rebaseline()` then `git add -A` +
+    `commit --amend` in the tree: one commit, clean status, tree sha ≠ `headSha` on the
+    previous side, by design.
+  - `run.json` is `schema: 2`: `environment` is `"previous" | "candidate"` and `harness` is the
+    snapshot that ran. `--json` prints an array of both records. Exit code is the worse of the
+    two sides. When both hashes match, `run` warns on stderr that the delta is noise, and still
+    runs both.
+  - Not built: a flag to run one side only (cheap to add when the judge/compare story needs
+    it; today `run` always pays for both), and reusing an earlier `previous` run with the same
+    hash instead of re-running it.
+
 ## Next
 
 1. Test `init --dry-run` on a real repo with a real `CLAUDE.md`; check the harness list,
    test command and base branch are right. Fix what's wrong.
 2. Real-agent smoke of `run` (see above); fix what the real stream shows that the recording
    did not.
-3. Harness overlay: materialise `previous` by writing base-branch versions of harness files
-   (deleting ones absent there); hash the resolved harness set and print it.
-4. Judge: pairwise, blind, position-swapped, structured output; default rubrics.
-5. `compare` + markdown report; GitHub Action that comments on PRs touching harness files.
-6. More agent adapters (Codex, Aider, Gemini CLI, OpenCode, Pi): implement `AgentAdapter` and
+3. Judge: pairwise, blind, position-swapped, structured output; default rubrics.
+4. `compare` + markdown report; GitHub Action that comments on PRs touching harness files.
+   Cache `previous` by harness hash so a PR pays only for the candidate side.
+5. More agent adapters (Codex, Aider, Gemini CLI, OpenCode, Pi): implement `AgentAdapter` and
    register it in `agents/index.ts`. Note `detect/agents.ts` knows more binaries than we have
    adapters for — it reports what is on PATH; only a binary with an adapter is offered.
 

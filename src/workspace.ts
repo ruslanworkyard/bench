@@ -1,16 +1,20 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, realpath, rm } from "node:fs/promises";
+import { chmod, mkdir, readdir, realpath, rm, rmdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { promisify } from "node:util";
 
+import type { HarnessSnapshot } from "./detect/harness.js";
 import { CliError } from "./errors.js";
 
 const execFileAsync = promisify(execFile);
 
 /** Diffs and git output are held in memory once; 64 MiB is far more than a run should produce. */
 const MAX_BUFFER = 64 * 1024 * 1024;
+
+/** The overlay never writes here: git internals, and our own state. */
+const OVERLAY_SKIP = new Set([".git", ".harnessbench"]);
 
 export type WorkspaceOptions = {
   /** Absolute path to the repository being copied. It is only ever read. */
@@ -96,6 +100,45 @@ export class Workspace {
     });
   }
 
+  /**
+   * Replaces the harness in the tree (`head`, as cloned) with `previous`, read from the host
+   * repository at `previous.sha`: the clone is shallow, so the host is the only source. Every
+   * path of `head` goes first, so a file only the candidate has does not survive; directories
+   * left empty go with it. `.git/` and `.harnessbench/` are never touched, and nothing is
+   * written to the host.
+   */
+  async overlayHarness(repoRoot: string, head: HarnessSnapshot, previous: HarnessSnapshot): Promise<void> {
+    for (const path of head.files.filter(overlayable)) {
+      await rm(join(this.tree, ...path.split("/")), { force: true });
+      await removeEmptyParents(this.tree, path);
+    }
+
+    const files = previous.files.filter(overlayable);
+    if (files.length === 0) return;
+    // One ls-tree for every file's mode, then one show per file for its bytes.
+    const listing = await git(["ls-tree", "-r", "-z", previous.sha, "--", ...files], repoRoot);
+    for (const entry of listing.split("\0")) {
+      const tab = entry.indexOf("\t");
+      if (tab === -1) continue;
+      const mode = entry.slice(0, tab).split(" ")[0];
+      const path = entry.slice(tab + 1);
+      const target = join(this.tree, ...path.split("/"));
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, await gitBytes(["show", `${previous.sha}:${path}`], repoRoot));
+      await chmod(target, mode === "100755" ? 0o755 : 0o644);
+    }
+  }
+
+  /**
+   * Folds everything currently in the tree into its one commit, so the agent finds a clean
+   * checkout with a single commit either way, and `diff()` measures only what happens next.
+   * The commit sha changes; `headSha` keeps naming the host commit the code came from.
+   */
+  async rebaseline(): Promise<void> {
+    await git(["add", "-A", "--", ".", ":(exclude).harnessbench"], this.tree);
+    await git(["commit", "--quiet", "--amend", "--no-edit", "--allow-empty"], this.tree);
+  }
+
   /** Everything the run changed in the tree, tracked or not, except our own state directory. */
   async diff(): Promise<string> {
     await git(["add", "-N", "."], this.tree);
@@ -152,6 +195,25 @@ export async function withWorkspace<T>(
       process.stderr.write(`workspace kept at ${workspace.dir}\n`);
     } else {
       await workspace.destroy();
+    }
+  }
+}
+
+/** A path the overlay may delete or write: not git's, not ours, and inside the tree. */
+function overlayable(path: string): boolean {
+  const segments = path.split("/");
+  return !segments.some((segment) => OVERLAY_SKIP.has(segment) || segment === "..");
+}
+
+/** Removes the directories above `path` that its deletion left empty, stopping at the tree root. */
+async function removeEmptyParents(tree: string, path: string): Promise<void> {
+  for (let dir = posix.dirname(path); dir !== "." && dir !== ""; dir = posix.dirname(dir)) {
+    const absolute = join(tree, ...dir.split("/"));
+    try {
+      if ((await readdir(absolute)).length > 0) return;
+      await rmdir(absolute);
+    } catch {
+      return; // Already gone, or not a directory.
     }
   }
 }
@@ -223,6 +285,16 @@ async function git(args: string[], cwd: string): Promise<string> {
       encoding: "utf8",
       maxBuffer: MAX_BUFFER,
     });
+    return stdout;
+  } catch (error) {
+    throw new CliError(`git ${args.join(" ")}: ${gitMessage(error)}`);
+  }
+}
+
+/** As `git`, with stdout as bytes: for file contents, which need not be text. */
+async function gitBytes(args: string[], cwd: string): Promise<Buffer> {
+  try {
+    const { stdout } = await execFileAsync("git", args, { cwd, encoding: "buffer", maxBuffer: MAX_BUFFER });
     return stdout;
   } catch (error) {
     throw new CliError(`git ${args.join(" ")}: ${gitMessage(error)}`);

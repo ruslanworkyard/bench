@@ -17,12 +17,18 @@ function tempDir(): string {
 
 function record(): RunRecord {
   return {
-    schema: 1,
+    schema: 2,
     runId: "20260919-031455-ttl-cache-candidate",
     fixture: "ttl-cache",
     environment: "candidate",
     headSha: "0123456789abcdef0123456789abcdef01234567",
     baseBranch: "main",
+    harness: {
+      ref: "HEAD",
+      sha: "0123456789abcdef0123456789abcdef01234567",
+      files: ["CLAUDE.md", "docs/style.md"],
+      hash: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    },
     agent: { name: "claude-code", command: "/usr/local/bin/claude", model: "claude-sonnet-4-5" },
     outcome: "completed",
     exitCode: 0,
@@ -56,12 +62,12 @@ test("a run record round-trips through run.json", () => {
 
 test("readRunRecord rejects a run.json with another schema", () => {
   const dir = tempDir();
-  writeFileSync(join(dir, "run.json"), JSON.stringify({ ...record(), schema: 2 }), "utf8");
+  writeFileSync(join(dir, "run.json"), JSON.stringify({ ...record(), schema: 1 }), "utf8");
 
   assert.throws(
     () => readRunRecord(dir),
     (error: unknown) =>
-      error instanceof CliError && /run\.json.*schema 2.*expected 1/.test(error.message),
+      error instanceof CliError && /run\.json.*schema 1.*expected 2/.test(error.message),
   );
 });
 

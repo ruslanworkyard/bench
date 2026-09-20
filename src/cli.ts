@@ -12,6 +12,9 @@ Usage:
   harnessbench init [options]
   harnessbench run <fixture-id> [options]
 
+run drives the fixture twice on HEAD's code: first with the harness as committed at the
+merge base with the base branch (previous), then with the harness at HEAD (candidate).
+
 Options:
   --base <branch>   Base branch to compare against (overrides config/detection)
   --test <command>  Test command (init only; overrides detection)
@@ -23,8 +26,9 @@ Options:
   --json            Print the summary as one JSON object
   -h, --help        Show this help
 
-Exit codes (run): 0 completed, 2 agent timed out, 3 agent error, 1 anything else.
-A failing test suite is a result, not an error: it does not change the exit code.`;
+Exit codes (run): 0 completed, 2 agent timed out, 3 agent error, 1 anything else; the
+worse of the two sides wins. A failing test suite is a result, not an error: it does not
+change the exit code.`;
 
 type Flags = Record<string, string | true>;
 
@@ -98,7 +102,7 @@ async function main(argv: string[]): Promise<number> {
     if (fixtureId === undefined) {
       throw new CliError(`run needs a fixture id\n\n${HELP}`, 2);
     }
-    const record = await run({
+    const records = await run({
       cwd: process.cwd(),
       fixtureId,
       base: value(flags, "base"),
@@ -108,7 +112,7 @@ async function main(argv: string[]): Promise<number> {
       keep: flags["keep"] === true,
       json: flags["json"] === true,
     });
-    return RUN_EXIT_CODES[record.outcome];
+    return Math.max(...records.map((record) => RUN_EXIT_CODES[record.outcome]));
   }
   throw new CliError(`unknown command "${command}"\n\n${HELP}`, 2);
 }

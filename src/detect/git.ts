@@ -29,6 +29,12 @@ export function repoRoot(cwd: string): string | null {
   return root === null || root === "" ? null : root;
 }
 
+/** The commit where `ref` and HEAD diverged, or null when they share no history. */
+export function mergeBase(root: string, ref: string): string | null {
+  const sha = git(["merge-base", ref, "HEAD"], root);
+  return sha === null || sha === "" ? null : sha;
+}
+
 /** The branch a run should compare against: origin/HEAD, then main, then master. */
 export function baseBranch(root: string): Detection<string> | null {
   const head = git(["symbolic-ref", "--quiet", ORIGIN_HEAD], root);

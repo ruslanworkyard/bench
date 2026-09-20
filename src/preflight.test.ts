@@ -16,6 +16,8 @@ import {
   requireCredentials,
   requireFixture,
   requireGit,
+  requireHarnessSnapshot,
+  requireMergeBase,
   requireRepo,
 } from "./preflight.js";
 
@@ -208,4 +210,28 @@ test("requireFixture reads the fixture, and lists what exists for an unknown id"
 
   const error = cliError(() => requireFixture(root, "nope"), /unknown fixture 'nope'/);
   assert.match(error.message, /available fixtures:\n {2}announcements\n {2}ttl-cache/);
+});
+
+test("requireMergeBase finds where the branch left main, and explains when there is none", () => {
+  const root = repo();
+  const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, env: GIT_ENV, encoding: "utf8" }).trim();
+  git(root, "checkout", "--quiet", "-b", "feature");
+  write(root, "CLAUDE.md", "# House rules, revised\n");
+  git(root, "commit", "--quiet", "-am", "revise");
+
+  assert.equal(requireMergeBase(root, "main"), base);
+
+  git(root, "checkout", "--quiet", "--orphan", "unrelated");
+  git(root, "commit", "--quiet", "-m", "fresh start");
+  cliError(() => requireMergeBase(root, "main"), /no merge base between 'main' and HEAD.*--base/s);
+});
+
+test("requireHarnessSnapshot returns the snapshot, and names a ref that is not a commit", () => {
+  const root = repo();
+
+  const snapshot = requireHarnessSnapshot(root, "HEAD", []);
+  assert.deepEqual(snapshot.files, ["CLAUDE.md"]);
+  assert.match(snapshot.sha, /^[0-9a-f]{40}$/);
+
+  cliError(() => requireHarnessSnapshot(root, "nope", []), /'nope' is not a commit/);
 });

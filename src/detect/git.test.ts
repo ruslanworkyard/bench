@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import { baseBranch, repoRoot } from "./git.js";
+import { baseBranch, mergeBase, repoRoot } from "./git.js";
 
 const roots: string[] = [];
 
@@ -80,4 +80,19 @@ test("neither main nor master", () => {
   const unborn = tempDir();
   git(unborn, "init", "--quiet", "-b", "trunk");
   assert.equal(baseBranch(unborn), null);
+});
+
+test("mergeBase is where the branch and HEAD diverged, and null without shared history", () => {
+  const root = repo("main");
+  const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, env: GIT_ENV, encoding: "utf8" }).trim();
+  git(root, "checkout", "--quiet", "-b", "feature");
+  git(root, "commit", "--allow-empty", "--quiet", "-m", "on the branch");
+  git(root, "commit", "--allow-empty", "--quiet", "-m", "and again");
+
+  assert.equal(mergeBase(root, "main"), base);
+  assert.equal(mergeBase(root, "no-such-branch"), null);
+
+  git(root, "checkout", "--quiet", "--orphan", "unrelated");
+  git(root, "commit", "--allow-empty", "--quiet", "-m", "no shared history");
+  assert.equal(mergeBase(root, "main"), null);
 });
