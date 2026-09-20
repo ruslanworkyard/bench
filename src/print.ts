@@ -8,6 +8,7 @@ import type { HarnessEntry } from "./detect/harness.js";
 import type { Detection } from "./detect/types.js";
 import type { OpStatus } from "./plan.js";
 import type { RunRecord } from "./run-record.js";
+import type { Telemetry } from "./telemetry.js";
 
 export type FileReport = { path: string; status: OpStatus };
 
@@ -148,6 +149,25 @@ function testsLine(tests: RunRecord["tests"]): string {
   return `${tests.command} → failed, ${how}`;
 }
 
+/** `main 23 turns / 41 calls · Explore on claude-haiku-4-5: 12 calls`. */
+function threadsLine(t: Telemetry | undefined): string {
+  if (t === undefined) return "not recorded";
+  const main = `main ${plural(t.main.turns, "turn")} / ${plural(t.main.toolCalls, "call")}`;
+  const subs = t.subAgents.map(
+    (sub) => `${sub.tool} on ${sub.model ?? "model not reported"}: ${plural(sub.toolCalls, "call")}`,
+  );
+  return [main, ...subs].join(" · ");
+}
+
+function phasesLine(t: Telemetry | undefined): string {
+  if (t === undefined) return "not recorded";
+  const { exploringMs, buildingMs, verifyingMs } = t.phases;
+  return (
+    `exploring ${formatDuration(exploringMs)} · building ${formatDuration(buildingMs)} · ` +
+    `verifying ${formatDuration(verifyingMs)}`
+  );
+}
+
 function lastLines(text: string, n: number): string[] {
   return text.trimEnd().split("\n").filter((line) => line !== "").slice(-n);
 }
@@ -177,6 +197,8 @@ export function formatRun(record: RunRecord, agentStderrPath: string): string {
     `${"Turns".padEnd(11)}${String(record.turns).padEnd(5)}Tool calls  ${total}${byTool}   ` +
       `Tool failures ${record.toolFailures}`,
   );
+  lines.push(`${"Threads".padEnd(11)}${threadsLine(record.telemetry)}`);
+  lines.push(`${"Phases".padEnd(11)}${phasesLine(record.telemetry)}`);
   lines.push(
     `${"Tokens".padEnd(11)}in ${formatCount(tokens.input)}  out ${formatCount(tokens.output)}  ` +
       `cache read ${formatCount(tokens.cacheRead)}  cache write ${formatCount(tokens.cacheWrite)}`,

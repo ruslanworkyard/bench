@@ -1,8 +1,10 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import type { Usage } from "./agents/types.js";
 import type { HarnessSnapshot } from "./detect/harness.js";
 import { CliError } from "./errors.js";
+import type { Telemetry } from "./telemetry.js";
 
 /**
  * What one run left behind, as `run.json` in its run directory. Every later command reads a
@@ -46,13 +48,18 @@ export type RunRecord = {
   exitCode: number | null;
   startedAt: string;
   finishedAt: string;
-  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  tokens: Usage;
   /** Null when the agent does not report cost. */
   costUsd: number | null;
   durationMs: number;
   turns: number;
   toolCalls: Record<string, number>;
   toolFailures: number;
+  /**
+   * Per-thread activity derived from the transcript. Absent only in records written
+   * before it existed; readRunRecord still reads those, and compare says so in its rows.
+   */
+  telemetry?: Telemetry;
   diff: { files: number; added: number; removed: number };
   /** Null when no test command is configured. */
   tests: TestResult | null;

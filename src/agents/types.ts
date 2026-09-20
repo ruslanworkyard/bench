@@ -17,6 +17,8 @@ export type AgentRequest = {
   stderrPath: string;
 };
 
+export type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number };
+
 export type AgentResult = {
   outcome: "completed" | "timeout" | "error";
   /** Null when the agent was killed by a signal, including on timeout. */
@@ -24,7 +26,7 @@ export type AgentResult = {
   /** What actually ran, as the agent itself reported it; null when it did not. */
   model: string | null;
   finalMessage: string;
-  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  tokens: Usage;
   /** Null when the agent does not report cost. */
   costUsd: number | null;
   durationMs: number;
@@ -37,11 +39,43 @@ export type AgentResult = {
 /** How much of a tool's input or output is kept: enough to read, bounded per event. */
 export const MAX_EVENT_CHARS = 2000;
 
+/** What a tool does, in adapter-neutral terms, so telemetry never needs a tool's name. */
+export type ToolKind = "read" | "write" | "search" | "shell" | "spawn" | "other";
+
+/** The thread every event on the main conversation belongs to. */
+export const MAIN_THREAD = "main";
+
+type EventBase = {
+  /** "main", or the id of the `spawn` tool call whose sub-agent produced the event. */
+  thread: string;
+  /** Milliseconds since the agent process started, stamped when the line arrived. */
+  at: number;
+};
+
+/**
+ * The normalised transcript: the same shape for every adapter, so everything derived from
+ * it (telemetry, later the judge) is written once. One `assistant` event per assistant
+ * message, even one that only calls tools, so its model and usage are never lost.
+ */
 export type TranscriptEvent =
-  | { type: "assistant"; text: string }
-  | { type: "tool_call"; id: string; tool: string; input: unknown }
-  | { type: "tool_result"; id: string; isError: boolean; output: string }
-  | { type: "error"; message: string };
+  | (EventBase & {
+      type: "assistant";
+      text: string;
+      model: string | null;
+      /** This message's own usage, as the stream reports it per message; null when absent. */
+      usage: Usage | null;
+    })
+  | (EventBase & {
+      type: "tool_call";
+      id: string;
+      tool: string;
+      input: unknown;
+      kind: ToolKind;
+      /** For read/write: the file, relative to the workspace tree; null otherwise or when unknown. */
+      path: string | null;
+    })
+  | (EventBase & { type: "tool_result"; id: string; isError: boolean; output: string })
+  | (EventBase & { type: "error"; message: string });
 
 export type AgentAdapter = {
   name: string;

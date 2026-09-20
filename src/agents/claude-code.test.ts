@@ -135,7 +135,14 @@ test("a run reaches the agent, and its stream comes back whole", async () => {
   assert.equal(result.turns, 7);
   assert.deepEqual(result.toolCalls, { Read: 1, Bash: 1 });
   assert.equal(result.toolFailures, 1);
-  assert.equal(result.transcript.length, 6);
+  assert.equal(result.transcript.length, 8);
+  // Paths come back relative to the tree; arrival times are stamped and never go backwards.
+  for (const event of result.transcript) assert.ok(event.at >= 0 && event.at < 60_000, `${event.at}ms`);
+  for (let i = 1; i < result.transcript.length; i++) {
+    assert.ok((result.transcript[i]?.at ?? 0) >= (result.transcript[i - 1]?.at ?? 0));
+  }
+  const read = result.transcript.find((e) => e.type === "tool_call");
+  assert.equal(read?.type === "tool_call" && read.path, "src/cache.ts");
 
   // The stream is on disk exactly as the agent wrote it, before we made anything of it.
   assert.equal(readFileSync(rawOutputPath, "utf8"), readFileSync(stream, "utf8"));
@@ -210,7 +217,7 @@ test("an agent that hangs is a timeout, and leaves nothing behind", async () => 
   assert.ok(result.durationMs >= 500 && result.durationMs < 10_000, `${result.durationMs}ms`);
   assert.equal(running("sleep 3137"), false);
   assert.deepEqual(result.transcript, [
-    { type: "error", message: "timed out after 0.01 minutes" },
+    { thread: "main", at: result.durationMs, type: "error", message: "timed out after 0.01 minutes" },
   ]);
 });
 

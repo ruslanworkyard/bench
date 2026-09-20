@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import type { Comparison, Row } from "./compare.js";
-import { NOISE_LINE, formatComparison, formatComparisonMarkdown } from "./print.js";
+import { NOISE_LINE, formatComparison, formatComparisonMarkdown, formatRun } from "./print.js";
+import type { RunRecord } from "./run-record.js";
 
 function row(patch: Partial<Row> & { id: string; label: string }): Row {
   return { previous: "1", candidate: "1", delta: "", classification: "unchanged", ...patch };
@@ -87,4 +88,58 @@ test("formatComparisonMarkdown renders a valid GitHub table with the same conten
   assert.equal(body[2], "| Tokens | 1,203,000 | 960,000 | -21% | improved |  |");
   // A blank line separates every block, so the table is not glued to the paragraph above it.
   assert.equal(lines[header - 1], "");
+});
+
+function runRecord(patch: Partial<RunRecord> = {}): RunRecord {
+  return {
+    schema: 2,
+    runId: "20260919-031455-ttl-cache-candidate",
+    fixture: "ttl-cache",
+    environment: "candidate",
+    headSha: "0123456789abcdef0123456789abcdef01234567",
+    baseBranch: "main",
+    harness: { ref: "HEAD", sha: "0123456789abcdef0123456789abcdef01234567", files: ["CLAUDE.md"], hash: "candidate-hash" },
+    agent: { name: "claude-code", command: "claude", model: "claude-sonnet-4-5" },
+    outcome: "completed",
+    exitCode: 0,
+    startedAt: "2026-09-19T03:14:55.000Z",
+    finishedAt: "2026-09-19T03:19:07.000Z",
+    tokens: { input: 1203, output: 18940, cacheRead: 402113, cacheWrite: 10004 },
+    costUsd: 0.38,
+    durationMs: 252000,
+    turns: 23,
+    toolCalls: { Read: 18, Edit: 9, Bash: 14 },
+    toolFailures: 2,
+    telemetry: {
+      main: { turns: 20, toolCalls: 30, toolFailures: 2, tokens: { input: 1000, output: 16000, cacheRead: 300000, cacheWrite: 9000 } },
+      subAgents: [
+        { id: "toolu_01", tool: "Explore", model: "claude-haiku-4-5", turns: 3, toolCalls: 11, toolFailures: 0, tokens: { input: 203, output: 2940, cacheRead: 102113, cacheWrite: 1004 } },
+        { id: "toolu_02", tool: "Task", model: null, turns: 1, toolCalls: 1, toolFailures: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+      ],
+      readsBeforeFirstEdit: 6,
+      turnsBeforeFirstEdit: 4,
+      filesRead: 9,
+      repeatReads: 1,
+      duplicateReads: 2,
+      filesWritten: 5,
+      phases: { exploringMs: 62000, buildingMs: 150000, verifyingMs: 40000 },
+    },
+    diff: { files: 5, added: 212, removed: 7 },
+    tests: { command: "npm test", exitCode: 0, durationMs: 12000, timedOut: false },
+    finalMessage: "Added a TTL cache.",
+    ...patch,
+  };
+}
+
+test("formatRun summarises threads and phases on one line each", () => {
+  const lines = formatRun(runRecord(), "/nonexistent/agent.stderr.log").split("\n");
+
+  assert.ok(lines.includes("Turns      23   Tool calls  41 (Read 18, Edit 9, Bash 14)   Tool failures 2"));
+  assert.ok(lines.includes("Threads    main 20 turns / 30 calls · Explore on claude-haiku-4-5: 11 calls · Task on model not reported: 1 call"));
+  assert.ok(lines.includes("Phases     exploring 1m02s · building 2m30s · verifying 40s"));
+
+  const { telemetry: _dropped, ...earlier } = runRecord();
+  const old = formatRun(earlier as RunRecord, "/nonexistent/agent.stderr.log").split("\n");
+  assert.ok(old.includes("Threads    not recorded"));
+  assert.ok(old.includes("Phases     not recorded"));
 });

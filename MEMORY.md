@@ -87,10 +87,27 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
   `readRunRecord`.
   Later commands (compare, judge) read a run only through `readRunRecord`, which rejects any
   other schema number; that is the one place run-file compatibility lives.
+- `telemetry.ts` — `telemetry(events, durationMs): Telemetry`, pure, from the normalised
+  transcript only (never the raw stream, so every adapter gets it free): per-thread stats
+  (`main` and one entry per sub-agent with its spawning tool and model), reads/turns before
+  the main thread's first write, distinct files read/written, repeat reads (main re-reading
+  its own) and duplicate reads (main reading what a sub-agent already had), and the wall
+  clock split into exploring/building/verifying around the first and last write on any
+  thread. A `TranscriptEvent` carries `thread` ("main" or the spawn call's id) and `at`
+  (ms since the agent started, stamped by the adapter on arrival; the parser reads no
+  clock); `assistant` events carry `model` and per-message `usage`; `tool_call` events
+  carry an adapter-neutral `kind` and the `path` relative to the tree. One `assistant`
+  event per assistant message, even one with no text, so its usage and the turn count are
+  never lost. `RunRecord.telemetry` is optional only because older `run.json` files lack it;
+  `run` always writes it; `compare` shows those rows as `n/a`, "recorded by an earlier
+  version". Sub-agent tokens are part of the run's totals, reported per thread, never
+  subtracted.
 - `compare.ts` — `compare(previous, candidate): Comparison`, pure: one `Row` per criterion
   (`id`, `label`, display strings, `delta`, `classification`, optional `note`) plus `warnings`.
-  The noise thresholds are one table in this file (relative 0.15, 0.20 for diff; absolute
-  floors turns 3, toolCalls 3, toolFailures 1, files 1, lines 20); a delta must clear both.
+  The noise thresholds are one table in this file (relative 0.15, 0.20 for diff and the
+  read counts; absolute floors turns 3, tool calls 3, toolFailures 1, files 1, lines 20,
+  readsBeforeFirstEdit 3, duplicateReads 2); a delta must clear both. `subAgents` is
+  `neutral`: always `unchanged`, delta shown, note lists `<tool> on <model>` per side.
   No composite, no verdict. `commands/compare.ts` loads a pair (two ids, or the latest
   invocation for `--fixture`), orders it by environment, refuses mismatches, prints.
 - `errors.ts` — `CliError`, the shared vocabulary at the bottom of the graph.
@@ -209,7 +226,10 @@ a fake shell script stands in, so the suite is free, offline and deterministic.
   [--json] [--markdown]` prints the per-criterion delta table for one previous/candidate pair;
   `run` prints the same table after its two summaries (and appends the `Comparison` as a
   third element of `--json`). Rows, in order: outcome, tests, diff.files, diff.lines, turns,
-  toolCalls, toolFailures, tokens.total, tokens.output, costUsd, durationMs. Lower is better for
+  toolCalls.main, toolCalls.sub, toolFailures, subAgents, readsBeforeFirstEdit,
+  duplicateReads, tokens.mainCacheRead, phases.exploringMs, tokens.total, tokens.output,
+  costUsd, durationMs (the telemetry rows were added 2026-09-20, replacing a single
+  toolCalls row that mixed sub-agent calls into one side's count). Lower is better for
   every numeric row; counts show a signed delta, quantities a percentage. Warnings: a side that
   did not complete (effort rows from `turns` down become `n/a`), models differ, harness hashes
   equal, ids from different `run` invocations (still compared). A fixed line above every table
@@ -217,6 +237,17 @@ a fake shell script stands in, so the suite is free, offline and deterministic.
   ids: not one of each environment, different fixtures, different `headSha`, unreadable record.
   Latest-pair selection takes the newest timestamp prefix with both directories present and
   ignores a lone side. Exit 0 always; no gating, no thresholds in config, no `runs` listing.
+
+- Telemetry (2026-09-20). See `telemetry.ts` above. The Claude Code parser fills `thread`
+  from `parent_tool_use_id`, `kind` from the tool name (Read; Write/Edit/NotebookEdit;
+  Grep/Glob; Bash; Task/Agent; else other), `path` from `file_path` relative to
+  `workspace.tree` (outside the tree stays absolute; no tree → as given), and takes the
+  last of Claude Code's `result` events (it emits one when main yields to a background
+  sub-agent and one at the end). `formatRun` gained `Threads` and `Phases` lines.
+  `test/fixtures/claude-stream-subagent.jsonl` is the fake stream with a sub-agent, per-
+  message usage and two results. Schema stays 2. Not built: classifying shell commands,
+  a `max_turns` outcome, deduplicating an assistant message the stream splits across
+  several `assistant` events (each counts as a turn and carries the same usage, as today).
 
 ## Next
 
@@ -227,8 +258,7 @@ a fake shell script stands in, so the suite is free, offline and deterministic.
 3. Judge: pairwise, blind, position-swapped, structured output; default rubrics.
 4. GitHub Action that comments `compare --markdown` on PRs touching harness files.
    Cache `previous` by harness hash so a PR pays only for the candidate side. Then the
-   telemetry rows a later task adds to `run.json` (reads before first edit, sub-agents) and
-   the judge's rows join the same table.
+   judge's rows join the same table the telemetry rows already sit in.
 5. More agent adapters (Codex, Aider, Gemini CLI, OpenCode, Pi): implement `AgentAdapter` and
    register it in `agents/index.ts`. Note `detect/agents.ts` knows more binaries than we have
    adapters for — it reports what is on PATH; only a binary with an adapter is offered.

@@ -40,6 +40,19 @@ function record(): RunRecord {
     turns: 23,
     toolCalls: { Read: 18, Edit: 9, Bash: 14 },
     toolFailures: 2,
+    telemetry: {
+      main: { turns: 20, toolCalls: 30, toolFailures: 2, tokens: { input: 1000, output: 16000, cacheRead: 300000, cacheWrite: 9000 } },
+      subAgents: [
+        { id: "toolu_01", tool: "Explore", model: "claude-haiku-4-5", turns: 3, toolCalls: 11, toolFailures: 0, tokens: { input: 203, output: 2940, cacheRead: 102113, cacheWrite: 1004 } },
+      ],
+      readsBeforeFirstEdit: 6,
+      turnsBeforeFirstEdit: 4,
+      filesRead: 9,
+      repeatReads: 1,
+      duplicateReads: 2,
+      filesWritten: 5,
+      phases: { exploringMs: 60000, buildingMs: 150000, verifyingMs: 42000 },
+    },
     diff: { files: 5, added: 212, removed: 7 },
     tests: { command: "npm test", exitCode: 0, durationMs: 12000, timedOut: false },
     finalMessage: "Added a TTL cache.",
@@ -58,6 +71,17 @@ test("a run record round-trips through run.json", () => {
 
   assert.deepEqual(JSON.parse(readFileSync(join(dir, "run.json"), "utf8")), written);
   assert.deepEqual(readRunRecord(dir), written);
+});
+
+test("readRunRecord still reads a record written before telemetry existed", () => {
+  const dir = tempDir();
+  const { telemetry, ...earlier } = record();
+  writeFileSync(join(dir, "run.json"), JSON.stringify(earlier), "utf8");
+
+  const read = readRunRecord(dir);
+  assert.equal(read.telemetry, undefined);
+  assert.equal(read.turns, 23);
+  assert.notEqual(telemetry, undefined);
 });
 
 test("readRunRecord rejects a run.json with another schema", () => {

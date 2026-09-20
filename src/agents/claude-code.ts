@@ -3,7 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { StreamParser } from "./claude-code-stream.js";
-import type { AgentAdapter, AgentRequest, AgentResult } from "./types.js";
+import { MAIN_THREAD, type AgentAdapter, type AgentRequest, type AgentResult } from "./types.js";
 
 const DEFAULT_COMMAND = "claude";
 
@@ -105,10 +105,13 @@ export const claudeCode: AgentAdapter = {
     await mkdir(dirname(stderrPath), { recursive: true });
     const raw = createWriteStream(rawOutputPath);
     const errors = createWriteStream(stderrPath);
-    const parser = new StreamParser();
+    const parser = new StreamParser({ tree: workspace.tree });
     let pending = "";
     let stderr = "";
 
+    // The stream carries no clocks, so every line is stamped with when it reached us.
+    const started = Date.now();
+    const elapsed = (): number => Date.now() - started;
     const exec = await workspace.exec(commandLine(request), {
       env: env(configDir, config.env),
       stdin: prompt,
@@ -116,8 +119,9 @@ export const claudeCode: AgentAdapter = {
       onStdout: (chunk) => {
         raw.write(chunk); // Verbatim, before we make anything of it.
         pending += chunk;
+        const at = elapsed();
         for (let end = pending.indexOf("\n"); end !== -1; end = pending.indexOf("\n")) {
-          parser.push(pending.slice(0, end));
+          parser.push(pending.slice(0, end), at);
           pending = pending.slice(end + 1);
         }
       },
@@ -126,7 +130,7 @@ export const claudeCode: AgentAdapter = {
         stderr = (stderr + chunk).slice(-MAX_STDERR_CHARS);
       },
     });
-    if (pending !== "") parser.push(pending); // A last line with no newline.
+    if (pending !== "") parser.push(pending, elapsed()); // A last line with no newline.
     await Promise.all([finished(raw), finished(errors)]);
 
     const parsed = parser.finish();
@@ -138,10 +142,11 @@ export const claudeCode: AgentAdapter = {
 
     const transcript = [...parsed.transcript];
     // The agent records its own failures; these are the ones only we can see.
+    const ours = { thread: MAIN_THREAD, at: exec.durationMs, type: "error" } as const;
     if (outcome === "timeout") {
-      transcript.push({ type: "error", message: `timed out after ${config.timeoutMinutes} minutes` });
+      transcript.push({ ...ours, message: `timed out after ${config.timeoutMinutes} minutes` });
     } else if (outcome === "error" && !parsed.isError) {
-      transcript.push({ type: "error", message: exited(exec.exitCode, stderr) });
+      transcript.push({ ...ours, message: exited(exec.exitCode, stderr) });
     }
 
     return {

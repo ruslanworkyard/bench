@@ -26,6 +26,7 @@ import {
   type RunRecord,
   type TestResult,
 } from "../run-record.js";
+import { telemetry } from "../telemetry.js";
 import { withWorkspace, type Workspace } from "../workspace.js";
 
 export type RunOptions = {
@@ -175,7 +176,8 @@ async function runSide(side: Side): Promise<{ record: RunRecord; stderrPath: str
         exitCode: result.exitCode,
         startedAt: startedAt.toISOString(),
         finishedAt: new Date().toISOString(),
-        ...telemetry(result),
+        ...spend(result),
+        telemetry: telemetry(result.transcript, result.durationMs),
         diff: summariseDiff(diff),
         tests,
         finalMessage: result.finalMessage,
@@ -187,7 +189,8 @@ async function runSide(side: Side): Promise<{ record: RunRecord; stderrPath: str
   return { record, stderrPath };
 }
 
-function telemetry(result: AgentResult) {
+/** The top-level figures the agent reported for the whole run. */
+function spend(result: AgentResult) {
   const { tokens, costUsd, durationMs, turns, toolCalls, toolFailures } = result;
   return { tokens, costUsd, durationMs, turns, toolCalls, toolFailures };
 }

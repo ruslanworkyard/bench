@@ -81,7 +81,7 @@ Then run a fixture:
 npx harnessbench run ttl-cache
 ```
 
-`run` drives the fixture twice on the same code, the current `HEAD`: once as `previous`, with the harness files as they were committed at the merge base of your branch and the base branch, and once as `candidate`, with the harness at `HEAD`. Each side gets a disposable shallow clone (for `previous`, the merge-base harness is overlaid on top and folded into the clone's single commit, so the agent sees an ordinary checkout), the fixture's prompt is handed to the agent there, the diff is captured, your test command runs against the result, and everything lands in `.harnessbench/runs/<timestamp>-<fixture>-<environment>/`: the agent's raw output stream, a normalised `transcript.jsonl`, `diff.patch`, `test.log`, `agent.stderr.log` and a `run.json` with the outcome, telemetry, test result and a hash of the harness that ran. It then prints one summary per side:
+`run` drives the fixture twice on the same code, the current `HEAD`: once as `previous`, with the harness files as they were committed at the merge base of your branch and the base branch, and once as `candidate`, with the harness at `HEAD`. Each side gets a disposable shallow clone (for `previous`, the merge-base harness is overlaid on top and folded into the clone's single commit, so the agent sees an ordinary checkout), the fixture's prompt is handed to the agent there, the diff is captured, your test command runs against the result, and everything lands in `.harnessbench/runs/<timestamp>-<fixture>-<environment>/`: the agent's raw output stream, a normalised `transcript.jsonl`, `diff.patch`, `test.log`, `agent.stderr.log` and a `run.json` with the outcome, test result, a hash of the harness that ran, and the telemetry: what the agent reported for the whole run (tokens, cost, turns, tool calls by name) plus what the transcript says about how it worked, derived once from `transcript.jsonl` so every adapter gets it for free: turns, calls, failures and tokens per thread (the main conversation and each sub-agent, with the model it ran on), reads and turns before the first edit, distinct files read and written, repeat reads (the main thread re-reading a file) and duplicate reads (the main thread reading what a sub-agent already had), and the wall clock split into exploring (start to first write), building (first to last write) and verifying (last write to the end). Each transcript event carries its thread and its arrival time in milliseconds since the agent started, and each tool call its adapter-neutral kind (read, write, search, shell, spawn, other) and the file it touched, relative to the workspace. It then prints one summary per side:
 
 ```
 harnessbench run  ttl-cache · previous  → completed in 3m48s
@@ -96,6 +96,8 @@ harnessbench run  ttl-cache · candidate  → completed in 4m12s
 Harness    2 files at 0655c52 (HEAD) · hash fde8ac86d613
 Agent      claude-code · claude-sonnet-4-5
 Turns      23   Tool calls  41 (Read 18, Edit 9, Bash 14)   Tool failures 2
+Threads    main 20 turns / 30 calls · Explore on claude-haiku-4-5: 11 calls
+Phases     exploring 1m02s · building 2m30s · verifying 40s
 Tokens     in 1,203  out 18,940  cache read 402,113  cache write 10,004
 Cost       $0.38
 Changes    5 files, +212 / -7
@@ -116,20 +118,26 @@ Runs       20260919-031455-ttl-cache-previous → 20260919-031455-ttl-cache-cand
 
 one run per side; deltas below the noise threshold are reported as unchanged
 
-Outcome        completed  → completed        unchanged
-Tests          failed     → passed           improved
-Files changed  6          → 5          -1    unchanged  within noise
-Lines changed  412        → 219        -47%  improved
-Turns          31         → 23         -8    improved
-Tool calls     58         → 41         -17   improved
-Tool failures  4          → 2          -2    improved
-Tokens         638,000    → 432,260    -32%  improved
-Output tokens  24,000     → 18,940     -21%  improved
-Cost           $0.51      → $0.38      -25%  improved
-Duration       3m48s      → 4m12s      +11%  unchanged  within noise
+Outcome                  completed  → completed        unchanged
+Tests                    failed     → passed           improved
+Files changed            6          → 5          -1    unchanged  within noise
+Lines changed            412        → 219        -47%  improved
+Turns                    31         → 23         -8    improved
+Tool calls (main)        58         → 30         -28   improved
+Tool calls (sub-agents)  0          → 11         +11   regressed
+Tool failures            4          → 2          -2    improved
+Sub-agents               0          → 1          +1    unchanged  previous none → candidate Explore on claude-haiku-4-5
+Reads before first edit  14         → 6          -8    improved
+Duplicate reads          0          → 2          +2    regressed
+Main-thread cache read   638,000    → 300,000    -53%  improved
+Exploring                2m10s      → 1m02s      -52%  improved
+Tokens                   638,000    → 432,260    -32%  improved
+Output tokens            24,000     → 18,940     -21%  improved
+Cost                     $0.51      → $0.38      -25%  improved
+Duration                 3m48s      → 4m12s      +11%  unchanged  within noise
 ```
 
-One row per criterion, lower is better for every count, and a delta only counts as `improved` or `regressed` when it clears both a relative threshold (15%, or 20% for the diff) and a small absolute floor (so 2 → 3 turns is never a regression). Anything the reader must know before trusting the rows is printed as a `warning:` line above them: a side that did not complete (its effort rows turn `n/a`), different models, an identical harness on both sides, or two runs from different `run` invocations.
+One row per criterion, lower is better for every count except `Sub-agents`, which is reported but never judged (delegating is a choice, not a cost; its note names the models that ran), and a delta only counts as `improved` or `regressed` when it clears both a relative threshold (15%, or 20% for the diff) and a small absolute floor (so 2 → 3 turns is never a regression). Anything the reader must know before trusting the rows is printed as a `warning:` line above them: a side that did not complete (its effort rows turn `n/a`), different models, an identical harness on both sides, or two runs from different `run` invocations. A `run.json` written before the per-thread telemetry existed still compares; its telemetry rows read `n/a`, "recorded by an earlier version".
 
 When both hashes are equal the harness did not change between the merge base and `HEAD`, and `run` says so before it starts: any difference between the two sides is then noise. `--json` prints both `run.json` records and the comparison as one array, `--keep` leaves both workspaces on disk and prints their paths, and `--max-turns` and `--model` override the config for one run. The exit code reports the agent, not your tests: 0 when both sides completed, 2 when either timed out, 3 when either failed, 1 for anything wrong with the setup. A failing test suite is a result, recorded in `run.json`, not an error.
 

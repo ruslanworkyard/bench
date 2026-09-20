@@ -1,5 +1,6 @@
 import { formatCount, formatDuration, formatUsd } from "./print.js";
 import type { RunRecord } from "./run-record.js";
+import type { Telemetry } from "./telemetry.js";
 
 /**
  * Two runs of one fixture on the same code, one per environment, turned into a table of
@@ -37,9 +38,10 @@ export type Comparison = {
 type Side = "previous" | "candidate";
 
 /**
- * A numeric row: lower is better for all of them. A delta counts as signal only when it
- * clears both the relative threshold and the absolute floor, so 2 → 3 turns is never a
- * regression. `delta` picks how the change is shown: a signed count or a percentage.
+ * A numeric row: lower is better for all of them but the `neutral` ones. A delta counts as
+ * signal only when it clears both the relative threshold and the absolute floor, so 2 → 3
+ * turns is never a regression. `delta` picks how the change is shown: a signed count or a
+ * percentage.
  */
 type NumericSpec = {
   id: string;
@@ -52,7 +54,36 @@ type NumericSpec = {
   floor: number;
   /** The note when `value` is null; only rows that can be null need one. */
   missing?: string;
+  /** Neither direction is better: always `unchanged`, with the delta shown. */
+  neutral?: true;
+  /** A note for a row both sides have a value for. */
+  note?: (previous: RunRecord, candidate: RunRecord) => string | undefined;
 };
+
+/** Rows read from `telemetry` are n/a on a record from before it was recorded. */
+const EARLIER_VERSION = "recorded by an earlier version";
+
+function fromTelemetry(pick: (t: Telemetry) => number): NumericSpec["value"] {
+  return (record) => (record.telemetry === undefined ? null : pick(record.telemetry));
+}
+
+function subAgentCalls(t: Telemetry): number {
+  return t.subAgents.reduce((sum, sub) => sum + sub.toolCalls, 0);
+}
+
+/** `Explore on claude-haiku-4-5, Task on claude-sonnet-5`, or "none". */
+function subAgentModels(record: RunRecord): string {
+  const subs = record.telemetry?.subAgents ?? [];
+  if (subs.length === 0) return "none";
+  return subs.map((sub) => `${sub.tool} on ${sub.model ?? "model not reported"}`).join(", ");
+}
+
+function subAgentsNote(previous: RunRecord, candidate: RunRecord): string | undefined {
+  const before = subAgentModels(previous);
+  const after = subAgentModels(candidate);
+  if (before === after) return before === "none" ? undefined : before;
+  return `previous ${before} → candidate ${after}`;
+}
 
 const NUMERIC_ROWS: NumericSpec[] = [
   {
@@ -83,13 +114,24 @@ const NUMERIC_ROWS: NumericSpec[] = [
     floor: 3,
   },
   {
-    id: "toolCalls",
-    label: "Tool calls",
-    value: (r) => Object.values(r.toolCalls).reduce((sum, n) => sum + n, 0),
+    id: "toolCalls.main",
+    label: "Tool calls (main)",
+    value: fromTelemetry((t) => t.main.toolCalls),
     format: formatCount,
     delta: "count",
     relative: 0.15,
     floor: 3,
+    missing: EARLIER_VERSION,
+  },
+  {
+    id: "toolCalls.sub",
+    label: "Tool calls (sub-agents)",
+    value: fromTelemetry(subAgentCalls),
+    format: formatCount,
+    delta: "count",
+    relative: 0.15,
+    floor: 3,
+    missing: EARLIER_VERSION,
   },
   {
     id: "toolFailures",
@@ -99,6 +141,58 @@ const NUMERIC_ROWS: NumericSpec[] = [
     delta: "count",
     relative: 0.15,
     floor: 1,
+  },
+  {
+    id: "subAgents",
+    label: "Sub-agents",
+    value: fromTelemetry((t) => t.subAgents.length),
+    format: formatCount,
+    delta: "count",
+    relative: 0,
+    floor: 0,
+    missing: EARLIER_VERSION,
+    neutral: true,
+    note: subAgentsNote,
+  },
+  {
+    id: "readsBeforeFirstEdit",
+    label: "Reads before first edit",
+    value: fromTelemetry((t) => t.readsBeforeFirstEdit),
+    format: formatCount,
+    delta: "count",
+    relative: 0.2,
+    floor: 3,
+    missing: EARLIER_VERSION,
+  },
+  {
+    id: "duplicateReads",
+    label: "Duplicate reads",
+    value: fromTelemetry((t) => t.duplicateReads),
+    format: formatCount,
+    delta: "count",
+    relative: 0.2,
+    floor: 2,
+    missing: EARLIER_VERSION,
+  },
+  {
+    id: "tokens.mainCacheRead",
+    label: "Main-thread cache read",
+    value: fromTelemetry((t) => t.main.tokens.cacheRead),
+    format: formatCount,
+    delta: "percent",
+    relative: 0.15,
+    floor: 0,
+    missing: EARLIER_VERSION,
+  },
+  {
+    id: "phases.exploringMs",
+    label: "Exploring",
+    value: fromTelemetry((t) => t.phases.exploringMs),
+    format: formatDuration,
+    delta: "percent",
+    relative: 0.15,
+    floor: 0,
+    missing: EARLIER_VERSION,
   },
   {
     id: "tokens.total",
@@ -276,10 +370,14 @@ function numericRow(spec: NumericSpec, previous: RunRecord, candidate: RunRecord
     return { ...row, classification: "n/a", note: spec.missing };
   }
 
+  // A note only when there is one: a `note: undefined` key would not survive --json.
+  const noted = spec.note?.(previous, candidate);
+  const note = noted === undefined ? {} : { note: noted };
   const change = after - before;
-  if (change === 0) return { ...row, classification: "unchanged" };
+  if (change === 0) return { ...row, classification: "unchanged", ...note };
 
   const delta = spec.delta === "count" || before === 0 ? signedCount(change) : percent(change, before);
+  if (spec.neutral) return { ...row, delta, classification: "unchanged", ...note };
   const relative = before === 0 ? Infinity : Math.abs(change) / before;
   const significant = Math.abs(change) >= spec.floor && relative >= spec.relative;
   if (!significant) return { ...row, delta, classification: "unchanged", note: "within noise" };

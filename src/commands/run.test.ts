@@ -226,6 +226,13 @@ test("run drives the agent in a workspace, once per environment, and leaves comp
   assert.equal(record.turns, 7);
   assert.deepEqual(record.toolCalls, { Read: 1, Bash: 1 });
   assert.equal(record.costUsd, 0.4213);
+  // Telemetry is derived from the transcript, so its calls agree with the agent's own count.
+  assert.equal(record.telemetry?.main.toolCalls, 2);
+  assert.equal(record.telemetry?.main.turns, 4);
+  assert.deepEqual(record.telemetry?.subAgents, []);
+  assert.equal(record.telemetry?.readsBeforeFirstEdit, 1);
+  assert.equal(record.telemetry?.filesRead, 1);
+  assert.deepEqual(record.telemetry?.phases, { exploringMs: record.durationMs, buildingMs: 0, verifyingMs: 0 });
   assert.ok(record.diff.files >= 1, JSON.stringify(record.diff));
   assert.equal(record.diff.added, 1);
   assert.equal(record.diff.removed, 0);
@@ -240,8 +247,13 @@ test("run drives the agent in a workspace, once per environment, and leaves comp
   // The raw stream is the recording, verbatim; the transcript is one event per line.
   assert.equal(readFileSync(join(dir, "raw.jsonl"), "utf8"), readFileSync(fixture("claude-stream.jsonl"), "utf8"));
   const transcript = readFileSync(join(dir, "transcript.jsonl"), "utf8").trimEnd().split("\n");
-  assert.equal(transcript.length, 6); // What the recording normalises to; see claude-code.test.
-  for (const line of transcript) assert.ok(typeof JSON.parse(line).type === "string");
+  assert.equal(transcript.length, 8); // What the recording normalises to; see claude-code.test.
+  for (const line of transcript) {
+    const event = JSON.parse(line);
+    assert.ok(typeof event.type === "string");
+    assert.equal(event.thread, "main");
+    assert.ok(typeof event.at === "number");
+  }
 
   assert.match(readFileSync(join(dir, "diff.patch"), "utf8"), /^\+\+\+ b\/agent-was-here\.txt$/m);
   assert.match(readFileSync(join(dir, "test.log"), "utf8"), /tests ok/);

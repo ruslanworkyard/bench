@@ -3,8 +3,9 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { parseStreamJson } from "./claude-code-stream.js";
-import { MAX_EVENT_CHARS } from "./types.js";
+import { telemetry } from "../telemetry.js";
+import { parseStreamJson, StreamParser } from "./claude-code-stream.js";
+import { MAX_EVENT_CHARS, type TranscriptEvent } from "./types.js";
 
 /** A recording of a real `claude -p --output-format stream-json` run, replayed from disk. */
 function recorded(name: string): string[] {
@@ -12,8 +13,14 @@ function recorded(name: string): string[] {
   return readFileSync(path, "utf8").split("\n");
 }
 
+const TREE = "/tmp/harnessbench/run/tree";
+
+function calls(events: TranscriptEvent[]) {
+  return events.filter((e) => e.type === "tool_call");
+}
+
 test("a complete run parses into every field of a result", () => {
-  const parsed = parseStreamJson(recorded("claude-stream.jsonl"));
+  const parsed = parseStreamJson(recorded("claude-stream.jsonl"), { tree: TREE });
 
   assert.equal(parsed.model, "claude-opus-5");
   assert.equal(parsed.finalMessage, "Added a TTL cache and wired it into the expensive read.");
@@ -24,24 +31,106 @@ test("a complete run parses into every field of a result", () => {
   assert.deepEqual(parsed.toolCalls, { Read: 1, Bash: 1 });
   assert.equal(parsed.toolFailures, 1);
   assert.equal(parsed.isError, false);
+  // One assistant event per message, even one that only calls a tool: its usage lives there.
+  const main = { thread: "main", at: 0 };
   assert.deepEqual(parsed.transcript, [
-    { type: "assistant", text: "I'll read the cache module before changing it." },
-    { type: "tool_call", id: "toolu_01", tool: "Read", input: { file_path: "src/cache.ts" } },
+    { ...main, type: "assistant", text: "I'll read the cache module before changing it.", model: "claude-opus-5", usage: null },
+    { ...main, type: "assistant", text: "", model: "claude-opus-5", usage: null },
+    { ...main, type: "tool_call", id: "toolu_01", tool: "Read", input: { file_path: "src/cache.ts" }, kind: "read", path: "src/cache.ts" },
     {
+      ...main,
       type: "tool_result",
       id: "toolu_01",
       isError: false,
       output: "export function get(key: string) {\n  return store.get(key);\n}\n",
     },
+    { ...main, type: "assistant", text: "", model: "claude-opus-5", usage: null },
     {
+      ...main,
       type: "tool_call",
       id: "toolu_02",
       tool: "Bash",
       input: { command: "npm test", description: "Run the test suite" },
+      kind: "shell",
+      path: null,
     },
-    { type: "tool_result", id: "toolu_02", isError: true, output: 'npm ERR! Missing script: "test"' },
-    { type: "assistant", text: "The suite has no test script." },
+    { ...main, type: "tool_result", id: "toolu_02", isError: true, output: 'npm ERR! Missing script: "test"' },
+    { ...main, type: "assistant", text: "The suite has no test script.", model: "claude-opus-5", usage: null },
   ]);
+});
+
+test("a sub-agent's events carry its thread, and the last of two results wins", () => {
+  const lines = recorded("claude-stream-subagent.jsonl");
+  const parser = new StreamParser({ tree: TREE });
+  lines.forEach((line, i) => parser.push(line, i * 100));
+  const parsed = parser.finish();
+
+  // Turns and tokens come from the final result, not the one emitted when main yielded.
+  assert.equal(parsed.turns, 9);
+  assert.deepEqual(parsed.tokens, { input: 99, output: 88, cacheRead: 777, cacheWrite: 66 });
+  assert.equal(parsed.costUsd, 0.42);
+  assert.equal(parsed.durationMs, 5000);
+  assert.equal(parsed.finalMessage, "Wired the cache.");
+  assert.deepEqual(parsed.toolCalls, { Task: 1, Read: 3, Grep: 1, Edit: 1 });
+  assert.equal(parsed.toolFailures, 1);
+
+  const byId = Object.fromEntries(calls(parsed.transcript).map((c) => [c.id, c]));
+  assert.deepEqual(
+    Object.entries(byId).map(([id, c]) => [id, c.thread, c.kind, c.path]),
+    [
+      ["toolu_task", "main", "spawn", null],
+      ["toolu_s1", "toolu_task", "read", "src/cache.ts"], // Relative to the tree.
+      ["toolu_s2", "toolu_task", "search", null],
+      ["toolu_03", "main", "read", "src/cache.ts"],
+      ["toolu_04", "main", "write", "src/cache.ts"],
+      ["toolu_05", "main", "read", "/etc/hosts"], // Outside the tree: stays absolute.
+    ],
+  );
+  assert.equal(byId["toolu_task"]?.at, 200); // Line 3 of the recording, stamped by the caller.
+  assert.equal(byId["toolu_task"]?.tool, "Task");
+
+  const results = parsed.transcript.filter((e) => e.type === "tool_result");
+  assert.deepEqual(
+    results.map((r) => [r.id, r.thread]),
+    [["toolu_s1", "toolu_task"], ["toolu_s2", "toolu_task"], ["toolu_task", "main"], ["toolu_03", "main"], ["toolu_04", "main"], ["toolu_05", "main"]],
+  );
+
+  const assistants = parsed.transcript.filter((e) => e.type === "assistant");
+  assert.equal(assistants.length, 9);
+  assert.deepEqual(assistants[0], {
+    thread: "main",
+    at: 100,
+    type: "assistant",
+    text: "Let me have a sub-agent map the cache module.",
+    model: "claude-opus-5",
+    usage: { input: 10, output: 20, cacheRead: 100, cacheWrite: 5 },
+  });
+  const sub = assistants.filter((a) => a.thread === "toolu_task");
+  assert.equal(sub.length, 3);
+  assert.equal(sub[0]?.model, "claude-haiku-4-5");
+  assert.deepEqual(sub[0]?.usage, { input: 5, output: 6, cacheRead: 7, cacheWrite: 8 });
+  // A sub-agent's prose is not the run's final message.
+  assert.equal(assistants[assistants.length - 1]?.text, "Done.");
+
+  // Telemetry recomputes turns and calls from the events and agrees with the parser.
+  const t = telemetry(parsed.transcript, 5000);
+  const parsedCalls = Object.values(parsed.toolCalls).reduce((sum, n) => sum + n, 0);
+  assert.equal(t.main.toolCalls + t.subAgents.reduce((sum, s) => sum + s.toolCalls, 0), parsedCalls);
+  assert.equal(t.main.turns + t.subAgents.reduce((sum, s) => sum + s.turns, 0), parsed.turns);
+  assert.equal(t.main.toolFailures, parsed.toolFailures);
+});
+
+test("without a tree, paths are kept as the agent gave them", () => {
+  const parsed = parseStreamJson([
+    `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Write","input":{"file_path":"${TREE}/a.ts"}}]}}`,
+    `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"b.ts"}}]}}`,
+    `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t3","name":"Read","input":{}}]}}`,
+    `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t4","name":"mcp__x__y","input":{"file_path":"c.ts"}}]}}`,
+  ]);
+  assert.deepEqual(
+    calls(parsed.transcript).map((c) => [c.kind, c.path]),
+    [["write", `${TREE}/a.ts`], ["read", "b.ts"], ["read", null], ["other", null]],
+  );
 });
 
 test("a run killed before its result event reports what it managed to say", () => {
@@ -56,7 +145,8 @@ test("a run killed before its result event reports what it managed to say", () =
   assert.deepEqual(parsed.toolCalls, { Bash: 1 });
   assert.equal(parsed.toolFailures, 0);
   assert.equal(parsed.isError, false);
-  assert.equal(parsed.transcript.length, 2);
+  assert.equal(parsed.transcript.length, 3);
+  assert.equal(telemetry(parsed.transcript, 0).main.turns, parsed.turns);
 });
 
 test("a failed result is carried as an error event", () => {
@@ -68,7 +158,9 @@ test("a failed result is carried as an error event", () => {
   assert.equal(parsed.isError, true);
   assert.equal(parsed.finalMessage, "Reached the turn limit.");
   assert.equal(parsed.costUsd, null);
-  assert.deepEqual(parsed.transcript, [{ type: "error", message: "Reached the turn limit." }]);
+  assert.deepEqual(parsed.transcript, [
+    { thread: "main", at: 0, type: "error", message: "Reached the turn limit." },
+  ]);
 });
 
 test("garbage, blank lines and unknown event types are skipped", () => {
@@ -85,7 +177,10 @@ test("garbage, blank lines and unknown event types are skipped", () => {
 
   assert.equal(parsed.finalMessage, "still here");
   assert.equal(parsed.turns, 2);
-  assert.deepEqual(parsed.transcript, [{ type: "assistant", text: "still here" }]);
+  assert.deepEqual(parsed.transcript, [
+    { thread: "main", at: 0, type: "assistant", text: "still here", model: null, usage: null },
+    { thread: "main", at: 0, type: "assistant", text: "", model: null, usage: null },
+  ]);
 });
 
 test("a tool's input and output are bounded", () => {
@@ -97,7 +192,7 @@ test("a tool's input and output are bounded", () => {
       `"content":"${huge}"}]}}`,
   ]);
 
-  const [call, result] = parsed.transcript;
+  const [, call, result] = parsed.transcript;
   assert.equal(call?.type, "tool_call");
   assert.equal(typeof (call as { input: unknown }).input, "string");
   assert.equal(String((call as { input: string }).input).length, MAX_EVENT_CHARS);
