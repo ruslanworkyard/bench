@@ -80,6 +80,11 @@ export type RunRecord = {
   finalMessage: string;
 };
 
+/** `YYYYMMDD-HHMMSS`, UTC: the prefix of every run directory, so they sort by time anywhere. */
+export function runStamp(date: Date): string {
+  return date.toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+}
+
 export function runRecordPath(dir: string): string {
   return join(dir, RUN_RECORD_FILE);
 }

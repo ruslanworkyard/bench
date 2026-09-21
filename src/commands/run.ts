@@ -19,9 +19,16 @@ import {
   requireRepo,
   type LoadedFixture,
 } from "../preflight.js";
-import { formatComparison, formatDirtyHarness, formatRun, formatSameHarness } from "../print.js";
+import {
+  formatComparison,
+  formatDirtyHarness,
+  formatRun,
+  formatSameHarness,
+  formatVerdicts,
+} from "../print.js";
 import {
   ENVIRONMENTS,
+  runStamp,
   writeRunRecord,
   type CommandResult,
   type Environment,
@@ -29,6 +36,7 @@ import {
 } from "../run-record.js";
 import { telemetry } from "../telemetry.js";
 import { withWorkspace, type Workspace } from "../workspace.js";
+import { defaultDeps, judgePair, type JudgeDeps, type JudgeRecord } from "./judge.js";
 
 export type RunOptions = {
   cwd: string;
@@ -40,6 +48,8 @@ export type RunOptions = {
   model?: string | undefined;
   keep: boolean;
   json: boolean;
+  /** Run the configured judges on the pair once both sides are in. */
+  judge: boolean;
 };
 
 /** A test suite, or a dependency install, that has not finished in this long is not going to. */
@@ -70,7 +80,7 @@ type Side = {
  * own workspace and run directory; both are recorded and summarised, in that order, and
  * the comparison of the two comes last.
  */
-export async function run(options: RunOptions): Promise<RunRecord[]> {
+export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): Promise<RunRecord[]> {
   requireGit();
   const root = requireRepo(options.cwd);
   const config = requireConfig(root);
@@ -101,7 +111,7 @@ export async function run(options: RunOptions): Promise<RunRecord[]> {
   if (head.hash === previous.hash) console.error(formatSameHarness(mergeBase));
 
   // One timestamp for both sides, so the two run ids differ only in their environment.
-  const stamp = timestamp(new Date());
+  const stamp = runStamp(new Date());
   const shared = {
     root,
     head,
@@ -136,9 +146,26 @@ export async function run(options: RunOptions): Promise<RunRecord[]> {
     summaries.push(formatRun(side.record, side.stderrPath));
   }
 
-  const comparison = compare(...(records as [RunRecord, RunRecord]));
-  if (options.json) console.log(JSON.stringify([...records, comparison], null, 2));
-  else console.log([...summaries, formatComparison(comparison)].join("\n\n"));
+  const pair = records as [RunRecord, RunRecord];
+  const comparison = compare(...pair);
+
+  // A refusal is not a failure of the run: both records exist, so say why and keep the exit code.
+  let verdicts: JudgeRecord | null = null;
+  if (options.judge) {
+    try {
+      verdicts = await judgePair(root, config, ...pair, deps);
+    } catch (error) {
+      if (!(error instanceof CliError)) throw error;
+      console.error(`judging skipped: ${error.message.replace(/\s*\n\s*/g, " ")}`);
+    }
+  }
+
+  const extra = verdicts === null ? [] : [verdicts];
+  if (options.json) console.log(JSON.stringify([...records, comparison, ...extra], null, 2));
+  else {
+    const table = formatComparison(comparison);
+    console.log([...summaries, table, ...extra.map(formatVerdicts)].join("\n\n"));
+  }
   return records;
 }
 
@@ -218,11 +245,6 @@ async function runSide(side: Side): Promise<{ record: RunRecord; stderrPath: str
 function spend(result: AgentResult) {
   const { tokens, costUsd, durationMs, turns, toolCalls, toolFailures } = result;
   return { tokens, costUsd, durationMs, turns, toolCalls, toolFailures };
-}
-
-/** `YYYYMMDD-HHMMSS`, UTC, so run ids sort by time wherever they are read. */
-function timestamp(date: Date): string {
-  return date.toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
 }
 
 function setupFailed(side: Side, setup: CommandResult, logPath: string): CliError {

@@ -25,19 +25,7 @@ export function compare(options: CompareOptions): Comparison {
   requireGit();
   const root = requireRepo(options.cwd);
   requireConfig(root);
-  const runsDir = join(root, RUNS_DIR);
-
-  let ids: readonly [string, string];
-  if (options.runIds !== undefined) ids = options.runIds;
-  else {
-    if (options.fixture === undefined) {
-      throw new CliError("compare needs two run ids, or --fixture <id> to pick its latest pair", 2);
-    }
-    ids = latestPair(runsDir, options.fixture);
-  }
-
-  const records = ids.map((id) => readRecord(runsDir, id)) as [RunRecord, RunRecord];
-  const [previous, candidate] = orderPair(records);
+  const [previous, candidate] = loadPair(root, "compare", options);
   const comparison = compareRecords(previous, candidate);
 
   if (options.json) console.log(JSON.stringify(comparison, null, 2));
@@ -46,7 +34,30 @@ export function compare(options: CompareOptions): Comparison {
   return comparison;
 }
 
-function readRecord(runsDir: string, id: string): RunRecord {
+/**
+ * The pair a command was pointed at: two ids in any order, or the latest pair of --fixture.
+ * Ordered previous then candidate, and refused unless they are comparable. `command` names
+ * the caller in the error a missing selection gets.
+ */
+export function loadPair(
+  root: string,
+  command: string,
+  options: { runIds?: readonly [string, string] | undefined; fixture?: string | undefined },
+): [RunRecord, RunRecord] {
+  const runsDir = join(root, RUNS_DIR);
+  let ids: readonly [string, string];
+  if (options.runIds !== undefined) ids = options.runIds;
+  else {
+    if (options.fixture === undefined) {
+      throw new CliError(`${command} needs two run ids, or --fixture <id> to pick its latest pair`, 2);
+    }
+    ids = latestPair(runsDir, options.fixture);
+  }
+  const records = ids.map((id) => readRecord(runsDir, id)) as [RunRecord, RunRecord];
+  return orderPair(records);
+}
+
+export function readRecord(runsDir: string, id: string): RunRecord {
   try {
     return readRunRecord(join(runsDir, id));
   } catch (error) {
@@ -56,13 +67,13 @@ function readRecord(runsDir: string, id: string): RunRecord {
 }
 
 /** The pair in environment order, refusing anything that is not one previous and one candidate. */
-function orderPair(records: [RunRecord, RunRecord]): [RunRecord, RunRecord] {
+export function orderPair(records: [RunRecord, RunRecord]): [RunRecord, RunRecord] {
   const ids = records.map((record) => record.runId).join(" and ");
   const previous = records.find((record) => record.environment === "previous");
   const candidate = records.find((record) => record.environment === "candidate");
   if (previous === undefined || candidate === undefined || previous === candidate) {
     const envs = records.map((record) => `${record.runId} is ${record.environment}`).join(", ");
-    throw new CliError(`compare needs one previous and one candidate run, got ${envs}`, 1);
+    throw new CliError(`the pair must be one previous and one candidate run, got ${envs}`, 1);
   }
   if (previous.fixture !== candidate.fixture) {
     throw new CliError(
@@ -80,10 +91,11 @@ function orderPair(records: [RunRecord, RunRecord]): [RunRecord, RunRecord] {
   return [previous, candidate];
 }
 
-const RUN_ID = /^(\d{8}-\d{6})-(.+)-(previous|candidate)$/;
+/** `<stamp>-<fixture>-<environment>`. A `-judge` directory is not a run and never matches. */
+export const RUN_ID = /^(\d{8}-\d{6})-(.+)-(previous|candidate)$/;
 
 /** The newest `run` invocation of `fixture` that left both a previous and a candidate directory. */
-function latestPair(runsDir: string, fixture: string): [string, string] {
+export function latestPair(runsDir: string, fixture: string): [string, string] {
   const sides = new Map<string, Set<string>>();
   const entries = existsSync(runsDir) ? readdirSync(runsDir, { withFileTypes: true }) : [];
   for (const entry of entries) {

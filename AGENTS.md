@@ -5,7 +5,8 @@ HarnessBench regression-tests AI coding harness changes such as `CLAUDE.md`, `.c
 ## Project
 
 * TypeScript, ESM, Node 20+.
-* No runtime dependencies.
+* No runtime dependencies except the model layer (`ai` and its providers, plus `zod`) used by
+  judges. Nothing outside `src/judge/` imports them; tests may import `ai/test` for the mock model.
 * Build with `npm run build`.
 * Run tests with `npm test`.
 * Do not claim a change works unless both pass.

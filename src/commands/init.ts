@@ -5,6 +5,7 @@ import { adapterForCommand, getAdapter } from "../agents/index.js";
 import {
   CONFIG_FILE,
   FIXTURES_DIR,
+  JUDGES_DIR,
   RUNS_DIR,
   STATE_DIR,
   defaults,
@@ -19,6 +20,7 @@ import { setupCommand } from "../detect/setup-command.js";
 import { testCommand } from "../detect/test-command.js";
 import type { Detection } from "../detect/types.js";
 import { copyOps, listFixtures, packagedFixturesDir } from "../fixtures.js";
+import { packagedJudgesDir } from "../judges.js";
 import { apply, type FileOp } from "../plan.js";
 import { requireGit, requireRepo } from "../preflight.js";
 import { formatJson, formatSummary, type FileReport, type Report } from "../print.js";
@@ -58,6 +60,26 @@ function display(root: string, path: string): string {
   return relative(root, path).split(sep).join("/");
 }
 
+type Catalogue = { added: string[]; present: string[]; ops: FileOp[] };
+
+/**
+ * Ops that copy every packaged directory under `from` into `to`, skipping ids the host already
+ * has: a fixture or judge the user edited is theirs. Fixtures and judges share this shape.
+ */
+function copyCatalogue(from: string, to: string): Catalogue {
+  const catalogue: Catalogue = { added: [], present: [], ops: [] };
+  for (const entry of listFixtures(from)) {
+    const target = join(to, entry.id);
+    if (existsSync(target)) {
+      catalogue.present.push(entry.id);
+      continue;
+    }
+    catalogue.added.push(entry.id);
+    catalogue.ops.push(...copyOps(entry.dir, target));
+  }
+  return catalogue;
+}
+
 export function init(options: InitOptions): void {
   requireGit();
   const root = requireRepo(options.cwd);
@@ -91,25 +113,16 @@ export function init(options: InitOptions): void {
   const core: FileOp[] = [
     { kind: "mkdir", path: join(root, STATE_DIR) },
     { kind: "mkdir", path: join(root, FIXTURES_DIR) },
+    { kind: "mkdir", path: join(root, JUDGES_DIR) },
     saveOp(root, config),
     { kind: "appendLine", path: join(root, ".gitignore"), line: `${RUNS_DIR}/` },
   ];
 
-  const added: string[] = [];
-  const present: string[] = [];
-  const fixtureOps: FileOp[] = [];
-  for (const fixture of listFixtures(packagedFixturesDir())) {
-    const target = join(root, FIXTURES_DIR, fixture.id);
-    if (existsSync(target)) {
-      present.push(fixture.id);
-      continue;
-    }
-    added.push(fixture.id);
-    fixtureOps.push(...copyOps(fixture.dir, target));
-  }
+  const fixtures = copyCatalogue(packagedFixturesDir(), join(root, FIXTURES_DIR));
+  const judges = copyCatalogue(packagedJudgesDir(), join(root, JUDGES_DIR));
 
   // Apply.
-  const applied = apply([...core, ...fixtureOps], { dryRun: options.dryRun });
+  const applied = apply([...core, ...fixtures.ops, ...judges.ops], { dryRun: options.dryRun });
   const files: FileReport[] = applied
     .slice(0, core.length)
     .map(({ op, status }) => ({ path: display(root, op.path), status }));
@@ -137,7 +150,8 @@ export function init(options: InitOptions): void {
     agent,
     agentsOnPath: agents?.value ?? [],
     baseBranch: base,
-    fixtures: { added, present },
+    fixtures: { added: fixtures.added, present: fixtures.present },
+    judges: { added: judges.added, present: judges.present },
     files,
     warnings,
     next: NEXT_COMMAND,

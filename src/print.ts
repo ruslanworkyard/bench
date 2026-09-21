@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { relative } from "node:path";
 
 // Type-only, so compare.ts importing the value formatters below is not a cycle.
+import type { JudgeRecord } from "./commands/judge.js";
 import type { Comparison } from "./compare.js";
 import { RUNS_DIR } from "./config.js";
 import type { HarnessEntry } from "./detect/harness.js";
@@ -23,6 +24,7 @@ export type Report = {
   agentsOnPath: string[];
   baseBranch: Detection<string> | null;
   fixtures: { added: string[]; present: string[] };
+  judges: { added: string[]; present: string[] };
   files: FileReport[];
   warnings: string[];
   next: string;
@@ -81,13 +83,17 @@ export function formatSummary(report: Report): string {
   lines.push(field("Base branch", report.baseBranch, "none detected"));
 
   lines.push("");
-  const { added, present } = report.fixtures;
   const verb = report.dryRun ? "would add" : "added";
-  lines.push(
-    `Fixtures      ${added.length > 0 ? `${verb}: ${added.join(", ")}` : `${verb}: none`}`,
-  );
-  if (present.length > 0) {
-    lines.push(`${" ".repeat(LABEL_WIDTH)}already present: ${present.join(", ")}`);
+  for (const [label, { added, present }] of [
+    ["Fixtures", report.fixtures],
+    ["Judges", report.judges],
+  ] as const) {
+    lines.push(
+      `${label.padEnd(LABEL_WIDTH)}${added.length > 0 ? `${verb}: ${added.join(", ")}` : `${verb}: none`}`,
+    );
+    if (present.length > 0) {
+      lines.push(`${" ".repeat(LABEL_WIDTH)}already present: ${present.join(", ")}`);
+    }
   }
 
   lines.push("");
@@ -327,6 +333,34 @@ export function formatComparisonMarkdown(c: Comparison): string {
   for (const row of c.rows) {
     const cells = [row.label, row.previous, row.candidate, row.delta, row.classification, row.note ?? ""];
     lines.push(`| ${cells.map(cell).join(" | ")} |`);
+  }
+  return lines.join("\n");
+}
+
+/** `candidate preferred`, `previous preferred` or `tie`: the verdict, in the reader's words. */
+function preferenceLabel(preference: JudgeRecord["verdicts"][number]["preference"]): string {
+  return preference === "tie" ? "tie" : `${preference} preferred`;
+}
+
+/** The verdicts of one judge run: a header naming the pair, then one line per judge. */
+export function formatVerdicts(record: JudgeRecord): string {
+  const lines: string[] = [];
+  lines.push(`harnessbench judge  ${record.fixture} · code ${short(record.headSha)}`);
+  lines.push("");
+  lines.push(`${"Runs".padEnd(11)}${record.previous.runId} → ${record.candidate.runId}`);
+  lines.push(`${"Shown as".padEnd(11)}A = ${record.mapping.A}, B = ${record.mapping.B}`);
+  lines.push("");
+  if (record.verdicts.length === 0) {
+    lines.push("no verdicts");
+    return lines.join("\n");
+  }
+  const titleWidth = Math.max(...record.verdicts.map((verdict) => verdict.title.length));
+  const labelWidth = Math.max(...record.verdicts.map((verdict) => preferenceLabel(verdict.preference).length));
+  for (const verdict of record.verdicts) {
+    const reason = verdict.reason.replace(/\s*\n\s*/g, " ").trim();
+    lines.push(
+      `${verdict.title.padEnd(titleWidth)}  ${preferenceLabel(verdict.preference).padEnd(labelWidth)}   ${reason}`.trimEnd(),
+    );
   }
   return lines.join("\n");
 }

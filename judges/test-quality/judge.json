@@ -1,0 +1,7 @@
+{
+  "id": "test-quality",
+  "title": "Test quality",
+  "description": "The quality of the tests added or changed, apart from whether they pass",
+  "prompt": "prompt.md",
+  "context": ["prompt", "diff", "tests"]
+}

@@ -17,9 +17,12 @@ import {
   requireFixture,
   requireGit,
   requireHarnessSnapshot,
+  requireJudgeKey,
+  requireJudgeModel,
   requireMergeBase,
   requireRepo,
 } from "./preflight.js";
+import type { LoadedJudge } from "./judges.js";
 
 const roots: string[] = [];
 
@@ -234,4 +237,77 @@ test("requireHarnessSnapshot returns the snapshot, and names a ref that is not a
   assert.match(snapshot.sha, /^[0-9a-f]{40}$/);
 
   cliError(() => requireHarnessSnapshot(root, "nope", []), /'nope' is not a commit/);
+});
+
+/** A judge as `judges.ts` would load it, with the given overrides. */
+function judge(overrides: Partial<LoadedJudge["meta"]> = {}): LoadedJudge {
+  return {
+    dir: "",
+    rubric: "",
+    meta: {
+      id: "code-quality",
+      title: "Code quality",
+      description: "d",
+      prompt: "prompt.md",
+      context: ["prompt", "diff"],
+      provider: null,
+      model: null,
+      apiKeyEnv: null,
+      ...overrides,
+    },
+  };
+}
+
+const JUDGE_CONFIG = { ...defaults().judge, model: "claude-sonnet-4-5" };
+
+test("requireJudgeModel resolves environment over judge.json over config, and the conventional key variable", () => {
+  assert.deepEqual(requireJudgeModel(judge(), JUDGE_CONFIG, {}), {
+    provider: "anthropic",
+    model: "claude-sonnet-4-5",
+    apiKeyEnv: "ANTHROPIC_API_KEY",
+    baseUrl: "",
+  });
+
+  const overridden = judge({ provider: "openai", model: "gpt-5", apiKeyEnv: "TEAM_OPENAI_KEY" });
+  assert.deepEqual(requireJudgeModel(overridden, JUDGE_CONFIG, {}), {
+    provider: "openai",
+    model: "gpt-5",
+    apiKeyEnv: "TEAM_OPENAI_KEY",
+    baseUrl: "",
+  });
+
+  const env = { HARNESSBENCH_JUDGE_PROVIDER: "google", HARNESSBENCH_JUDGE_MODEL: "gemini-3-pro" };
+  const fromEnv = requireJudgeModel(overridden, JUDGE_CONFIG, env);
+  assert.equal(fromEnv.provider, "google");
+  assert.equal(fromEnv.model, "gemini-3-pro");
+  assert.equal(fromEnv.apiKeyEnv, "TEAM_OPENAI_KEY"); // judge.json still names the variable.
+  assert.equal(requireJudgeModel(judge(), { ...JUDGE_CONFIG, provider: "google" }, {}).apiKeyEnv, "GOOGLE_GENERATIVE_AI_API_KEY");
+  assert.equal(requireJudgeModel(judge(), { ...JUDGE_CONFIG, apiKeyEnv: "MY_KEY" }, {}).apiKeyEnv, "MY_KEY");
+  // An empty environment variable is "not set", not an override.
+  assert.equal(requireJudgeModel(judge(), JUDGE_CONFIG, { HARNESSBENCH_JUDGE_MODEL: "" }).model, "claude-sonnet-4-5");
+});
+
+test("requireJudgeModel refuses a missing model, a bad provider override, and openai-compatible without a URL", () => {
+  const error = cliError(() => requireJudgeModel(judge(), defaults().judge, {}), /judge 'code-quality' has no model/);
+  assert.match(error.message, /"judge\.model" in \.harnessbench\/config\.json/);
+  assert.match(error.message, /"model" in \.harnessbench\/judges\/code-quality\/judge\.json/);
+  assert.match(error.message, /HARNESSBENCH_JUDGE_MODEL/);
+
+  cliError(
+    () => requireJudgeModel(judge(), JUDGE_CONFIG, { HARNESSBENCH_JUDGE_PROVIDER: "bedrock" }),
+    /HARNESSBENCH_JUDGE_PROVIDER is 'bedrock'; judge providers are anthropic, openai, google, openai-compatible/,
+  );
+
+  const compatible = { ...JUDGE_CONFIG, provider: "openai-compatible" as const };
+  cliError(() => requireJudgeModel(judge(), compatible, {}), /openai-compatible provider, which needs "judge\.baseUrl"/);
+  const resolved = requireJudgeModel(judge(), { ...compatible, baseUrl: "http://localhost:11434/v1" }, {});
+  assert.equal(resolved.baseUrl, "http://localhost:11434/v1");
+  assert.equal(resolved.apiKeyEnv, "OPENAI_API_KEY");
+});
+
+test("requireJudgeKey checks only that the variable is set, and names it when it is not", () => {
+  const resolved = requireJudgeModel(judge(), JUDGE_CONFIG, {});
+  requireJudgeKey(judge(), resolved, { ANTHROPIC_API_KEY: "sk-test" });
+  const error = cliError(() => requireJudgeKey(judge(), resolved, { ANTHROPIC_API_KEY: "" }), /no API key for judge 'code-quality' \(anthropic\): set ANTHROPIC_API_KEY/);
+  assert.match(error.message, /"judge\.apiKeyEnv"/);
 });

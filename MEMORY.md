@@ -41,8 +41,18 @@ Goal: an open-source npm package (`npx harnessbench`) people adopt. Quality over
   preflight only checks that one of the adapter's `credentialEnv` names is set, and the
   adapter forwards the ones on its `forwardEnv` list. The agent gets nothing else: its config
   directory is inside the workspace, so the user's own `~/.claude` is neither read nor written.
-- **Single npm package**, TypeScript, ESM, Node >= 20, no runtime dependencies. Split later along
-  interface seams if ever needed. Hand-written argv parsing until it hurts.
+- **Single npm package**, TypeScript, ESM, Node >= 20. No runtime dependencies except the model
+  layer used by judges: `ai` with `@ai-sdk/anthropic`, `@ai-sdk/openai`, `@ai-sdk/google`,
+  `@ai-sdk/openai-compatible`, and `zod` for the verdict schema, all pinned to exact versions.
+  Nothing outside `src/judge/` imports them (tests may import `ai/test` for the mock model).
+  Split later along interface seams if ever needed. Hand-written argv parsing until it hurts.
+- **Judges are a catalogue like fixtures**: `judges/<id>/judge.json` + `prompt.md` ship with the
+  package, `init` copies them into `.harnessbench/judges/`, the repo edits or adds its own. A
+  judge is a rubric plus a declaration of what it may look at (`context`, from a fixed menu).
+  The judge sees the two sides as **A** and **B**, `previous` always A and `candidate` always
+  B, fixed by design: a first-position tilt, if any, favours the incumbent. The mapping is
+  recorded in `judge.json` anyway. No truncation, ever: an item over `judge.maxContextKb`
+  refuses the whole command. Only a pair of `completed` runs is judged.
 - **Bin name == package name** so `npx harnessbench` works.
 
 ## File relationship between the tool and a host repo
@@ -53,8 +63,11 @@ Goal: an open-source npm package (`npx harnessbench`) people adopt. Quality over
   .harnessbench/
     config.json                         written by init, committed
     fixtures/<id>/                      fixture.json + prompt.md, committed; built-ins are copied here
+    judges/<id>/                        judge.json + prompt.md, committed; built-ins are copied here
     runs/<ts>-<fixture>-<env>/          one run, gitignored: run.json, raw.jsonl, transcript.jsonl,
                                         diff.patch, setup.log, test.log, agent.stderr.log
+    runs/<ts>-<fixture>-judge/          the verdicts on that pair, gitignored: judge.json, and per
+                                        judge id prompt.txt (as sent) + response.json (raw reply)
 ```
 The tool reads the host through git, writes only under `.harnessbench/`, and works in a temp
 worktree (`$TMPDIR/harnessbench/<run>/tree`) with an isolated `HOME` for the agent.
@@ -73,15 +86,31 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
 | `plan.ts` | the only thing that writes | build `FileOp[]`, then `apply()` |
 | `print.ts` | the only thing that formats | `format*(data): string` |
 | `agents/` | drive one external agent | `run(AgentRequest): Promise<AgentResult>` — returns every outcome, throws for none |
-| `commands/` | compose the above, in order | init: detect → plan → apply → print; run: preflight → workspace → agent → record → print |
+| `judge/` | ask a model one question | `context.ts` (pure: pair → text), `provider.ts` (the only file that knows the AI SDK packages), `judge.ts` (`Judge` interface, `modelJudge`) |
+| `commands/` | compose the above, in order | init: detect → plan → apply → print; run: preflight → workspace → agent → record → print; judge: pair → refusals → context → model → record → print |
 | `cli.ts` | argv, exit codes | nothing else |
 
 **Domain nouns** — an object that appears in several layers gets its own top-level file:
 - `config.ts` — `Config` type (`baseBranch`, `testCommand`, `setupCommand`, the `agent` block,
-  `harness.extraPaths`), defaults, load/validate. Unknown keys at any level are an error naming
-  the key: a typo is otherwise a silently ignored setting. A missing key takes its default, so a
-  config written before a key existed keeps loading (`setupCommand` → `""`).
+  `harness.extraPaths`, the `judge` block, `judges`), defaults, load/validate. Unknown keys at
+  any level are an error naming the key: a typo is otherwise a silently ignored setting. A
+  missing key takes its default, so a config written before a key existed keeps loading
+  (`setupCommand` → `""`; no `judge` block → anthropic, empty model, 512 KB).
+  `judge` = `{provider: anthropic|openai|google|openai-compatible, model, apiKeyEnv, baseUrl,
+  maxContextKb}`; `judges` = the ids to run, in order. `init` writes `model: ""`: the choice is
+  the user's, and `judge` refuses until it is made.
 - `fixtures.ts` — locate packaged fixtures via `import.meta.url`, copy into the host.
+- `judges.ts` — the judge catalogue: `validateJudge` (unknown keys, `context` from the fixed
+  menu `prompt | diff | tests | finalMessage | toolLog | transcript`, optional `provider` /
+  `model` / `apiKeyEnv` overrides), `listJudges(root)` (duplicate ids refused, missing prompt
+  file named), `requireJudge(root, id)`. Directory listing is `listFixtures` from `fixtures.ts`:
+  a catalogue is a catalogue.
+- `preflight.ts` also resolves a judge's target: `requireJudgeModel` (environment
+  `HARNESSBENCH_JUDGE_PROVIDER` / `HARNESSBENCH_JUDGE_MODEL` > judge.json > config; empty
+  model → CliError naming the judge and the three places to set one; `openai-compatible` needs
+  `baseUrl`; an unnamed key variable is the provider's conventional one) and `requireJudgeKey`
+  (checks the variable is set, nothing more). The key's value is read only in
+  `judge/provider.ts`, at call time, straight into the SDK.
 - `workspace.ts` — a throwaway clone of the host + an isolated HOME, for one run; also the
   harness overlay (`overlayHarness`) and `rebaseline`, which folds the overlay into the clone's
   single commit so the agent sees a plain checkout and `diff()` measures only the agent's work.
@@ -113,6 +142,29 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
   `neutral`: always `unchanged`, delta shown, note lists `<tool> on <model>` per side.
   No composite, no verdict. `commands/compare.ts` loads a pair (two ids, or the latest
   invocation for `--fixture`), orders it by environment, refuses mismatches, prints.
+- `judge/context.ts` — pure. `assembleContext(items, pair)`: the fixture prompt once under
+  `# Task`, then `# Attempt A` and `# Attempt B`, each with the judge's other items in menu
+  order (`diff` verbatim; `tests` as `passed | failed | not configured`, never the log;
+  `finalMessage`; `toolLog` = one line per main-thread call `kind path-or-command`, a sub-agent
+  folded into its spawn line `spawn <tool> (<n> calls on <model>)`; `transcript` = every event
+  as readable text tagged `[main]` / `[sub-agent n]`, no JSON). Run ids and harness hashes are
+  scrubbed from the text (they leak through paths in the isolated HOME). `oversized(items,
+  pair, maxKb)` measures every rendered item per side before anything is sent.
+- `judge/judge.ts` — `INSTRUCTIONS` (the fixed block appended to every rubric, in code so an
+  edited rubric keeps it), `modelJudge(model)`: `generateText` with `Output.object` on the zod
+  schema `{preference: A|B|tie, reason}` (the AI SDK deprecates `generateObject` in favour of
+  this), one retry on a schema failure, then `VerdictError` (a `CliError` carrying the raw
+  reply and the prompt so the command can keep them). Any other model error is a `CliError`
+  naming the judge. `translate(preference)` maps A/B back to previous/candidate.
+- `commands/judge.ts` — `judge(options, deps)` for the CLI, `judgePair(root, config, previous,
+  candidate, deps)` shared with `run --judge`. Refusals, all before any model call: a side not
+  `completed`; the pair invalid (`loadPair`/`orderPair` from `commands/compare.ts`); unknown
+  judge id or empty list; unresolved model; key variable unset; a run without `diff.patch` or
+  `transcript.jsonl`; any oversize item across the union of every judge's context. Then the
+  judges run sequentially; the `-judge` directory is created only once judging goes ahead and
+  replaces an earlier one for the same stamp. `JudgeRecord` (`schema: 1`) lives here, like
+  `Comparison` lives in `compare.ts`. `deps.judgeFor(target)` is the seam tests use to hand in
+  `ai/test`'s `MockLanguageModelV4`; `cli.ts` passes nothing.
 - `errors.ts` — `CliError`, the shared vocabulary at the bottom of the graph.
 
 Imports form a DAG, checked by eye: `detect/*` imports nothing internal but `detect/types.ts`;
@@ -127,7 +179,8 @@ the only file that knows which adapters exist.
 One exception to "plan.ts is the only writer": a run's own directory (`.harnessbench/runs/<id>/`)
 is written directly by `commands/run.ts`, the adapter (`raw.jsonl`, `agent.stderr.log`) and
 `run-record.ts`, because its files are streamed while the agent runs and there is nothing to
-dry-run or plan. Everything under `.harnessbench/runs/` is gitignored output, not state.
+dry-run or plan; `commands/judge.ts` writes the `-judge` directory the same way. Everything
+under `.harnessbench/runs/` is gitignored output, not state.
 
 What the split buys: `--dry-run` and idempotence are free because one function writes; detectors
 are testable with a temp dir and no mocks; every error message is in one file, so they are
@@ -137,8 +190,8 @@ Split triggers (do not pre-empt them; the `print/` one has fired on paper with `
 the third command, and is deferred until `print.ts` actually hurts):
 - `runtime/` — this one fired, as `agents/`: the agent runner is a folder because it has an
   interface (`types.ts`), a registry (`index.ts`) and one file per agent. The harness overlay
-  turned out to be two methods on `Workspace`, not a sibling. The judge is the next candidate;
-  give it a folder only when it has more than one file.
+  turned out to be two methods on `Workspace`, not a sibling. `judge/` fired the same way: three
+  files (context, provider, judge) with the provider packages confined to one of them.
 - `print/init.ts` + `print/run.ts` + `print/format.ts` when a third command formats output. The
   data shape `Report` moves to the file that produces it (`RunRecord` already lives in
   `run-record.ts`); `print.ts` keeps the
@@ -290,16 +343,31 @@ a fake shell script stands in, so the suite is free, offline and deterministic.
   classification is unchanged (completed is best). Old records with the three earlier
   outcomes still read; schema stays 2. `test/fixtures/max-turns-claude.sh` is the fake.
 
+- Judges (2026-09-21). `harnessbench judge [<previous-id> <candidate-id> | --fixture <id>]
+  [--json]` and `run --judge`. Pair selection is `compare`'s (`loadPair`, now exported;
+  `latestPair` never matched `-judge` directories, and a test now says so). Three drafts ship,
+  each `prompt.md` opening with an HTML comment saying it is a draft: `code-quality` (context
+  `prompt, diff`), `engineering-practices` (`prompt, diff, toolLog`), `test-quality` (`prompt,
+  diff, tests`). Output is one line per verdict, `Code quality  candidate preferred  <reason>`,
+  under a header naming the pair and the A/B mapping; `--json` prints `judge.json`. `run
+  --judge` prints the verdicts after the comparison, appends the record to `--json`, and on a
+  refusal prints one `judging skipped: <why>` line on stderr and keeps the run's exit code; it
+  does not preflight the judge before the agents run, so an unset model is found out only
+  after both sides ran (spec'd that way; cheap to add if it bites). Usage per verdict is
+  summed over attempts. Not built: judge rows in `compare`, position swap, per-judge
+  concurrency, a real call to a real provider.
+
 ## Next
 
 1. Test `init --dry-run` on a real repo with a real `CLAUDE.md`; check the harness list,
    test command and base branch are right. Fix what's wrong.
 2. Real-agent smoke of `run` (see above); fix what the real stream shows that the recording
-   did not.
-3. Judge: pairwise, blind, position-swapped, structured output; default rubrics.
+   did not. Then `judge` on that pair with a real model: read `prompt.txt` and the verdicts by
+   hand; revise the three draft rubrics from what the model actually did with them.
+3. Judge rows in `compare` (`judge: candidate preferred` as a row per judge, from the latest
+   `-judge` directory of the pair); then position swap as an opt-in second call.
 4. GitHub Action that comments `compare --markdown` on PRs touching harness files.
-   Cache `previous` by harness hash so a PR pays only for the candidate side. Then the
-   judge's rows join the same table the telemetry rows already sit in.
+   Cache `previous` by harness hash so a PR pays only for the candidate side.
 5. More agent adapters (Codex, Aider, Gemini CLI, OpenCode, Pi): implement `AgentAdapter` and
    register it in `agents/index.ts`. Note `detect/agents.ts` knows more binaries than we have
    adapters for — it reports what is on PATH; only a binary with an adapter is offered.

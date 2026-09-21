@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { compare } from "./commands/compare.js";
 import { init } from "./commands/init.js";
+import { judge } from "./commands/judge.js";
 import { run } from "./commands/run.js";
 import { CliError } from "./errors.js";
 
 const VALUE_FLAGS = new Set(["base", "test", "setup", "agent", "max-turns", "model", "fixture"]);
-const BOOLEAN_FLAGS = new Set(["dry-run", "json", "keep", "markdown", "help"]);
+const BOOLEAN_FLAGS = new Set(["dry-run", "json", "keep", "markdown", "judge", "help"]);
 
 const HELP = `harnessbench - Regression tests for your CLAUDE.md.
 
@@ -13,11 +14,14 @@ Usage:
   harnessbench init [options]
   harnessbench run <fixture-id> [options]
   harnessbench compare [<previous-run-id> <candidate-run-id>] [options]
+  harnessbench judge [<previous-run-id> <candidate-run-id>] [options]
 
 run drives the fixture twice on HEAD's code: first with the harness as committed at the
 merge base with the base branch (previous), then with the harness at HEAD (candidate),
 and ends with the comparison of the two. compare prints that table again for two run ids,
-or for the latest run of --fixture <id>.
+or for the latest run of --fixture <id>. judge shows the same pair, blind, to every judge
+in the config's "judges" list and prints one verdict per judge; run --judge does that as
+soon as both sides are in.
 
 Options:
   --base <branch>   Base branch to compare against (overrides config/detection)
@@ -27,7 +31,8 @@ Options:
   --max-turns <n>   Agent turn limit for this run (run only; overrides config)
   --model <name>    Model for this run (run only; overrides config)
   --keep            Leave the run's workspace on disk (run only; path printed)
-  --fixture <id>    Compare the latest run pair of this fixture (compare only)
+  --judge           Run the configured judges once both sides are in (run only)
+  --fixture <id>    Use the latest run pair of this fixture (compare and judge)
   --markdown        Print the comparison as a GitHub-flavoured markdown table (compare only)
   --dry-run         Report what init would do, without writing anything
   --json            Print the summary as one JSON document
@@ -37,7 +42,9 @@ Exit codes (run): 0 completed, 2 agent timed out, 3 agent error, 4 agent hit the
 limit, 1 anything else; the worse of the two sides wins. A failing test suite is a result,
 not an error: it does not change the exit code. A failing setup command is exit 1 with no
 run.json for that side. compare exits 0 after printing: it reports,
-it does not gate.`;
+it does not gate. judge exits 0 with verdicts, 1 when it refuses (a side that did not
+complete, no model or key, context over the size limit); with run --judge a refusal is
+one line on stderr and the run's own exit code.`;
 
 type Flags = Record<string, string | true>;
 
@@ -121,8 +128,25 @@ async function main(argv: string[]): Promise<number> {
       model: value(flags, "model"),
       keep: flags["keep"] === true,
       json: flags["json"] === true,
+      judge: flags["judge"] === true,
     });
     return Math.max(...records.map((record) => RUN_EXIT_CODES[record.outcome]));
+  }
+  if (command === "judge") {
+    const ids = positional.slice(1);
+    if (ids.length !== 0 && ids.length !== 2) {
+      throw new CliError(`judge takes two run ids or none\n\n${HELP}`, 2);
+    }
+    if (ids.length === 0 && value(flags, "fixture") === undefined) {
+      throw new CliError(`judge needs two run ids, or --fixture <id>\n\n${HELP}`, 2);
+    }
+    await judge({
+      cwd: process.cwd(),
+      runIds: ids.length === 2 ? (ids as [string, string]) : undefined,
+      fixture: value(flags, "fixture"),
+      json: flags["json"] === true,
+    });
+    return 0;
   }
   if (command === "compare") {
     const ids = positional.slice(1);

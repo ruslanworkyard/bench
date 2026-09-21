@@ -6,11 +6,14 @@ import type { FileOp } from "./plan.js";
 
 export const STATE_DIR = ".harnessbench";
 export const FIXTURES_DIR = `${STATE_DIR}/fixtures`;
+export const JUDGES_DIR = `${STATE_DIR}/judges`;
 export const RUNS_DIR = `${STATE_DIR}/runs`;
 export const CONFIG_FILE = `${STATE_DIR}/config.json`;
 
 export const DEFAULT_BASE_BRANCH = "main";
 export const DEFAULT_TIMEOUT_MINUTES = 20;
+export const DEFAULT_MAX_CONTEXT_KB = 512;
+export const DEFAULT_JUDGES = ["code-quality", "engineering-practices", "test-quality"];
 
 /** How one agent is driven. `name` picks the adapter; the rest is that adapter's business. */
 export type AgentConfig = {
@@ -26,6 +29,23 @@ export type AgentConfig = {
   env: string[];
 };
 
+/** The model layers a judge can be served by; `provider.ts` in `judge/` knows what each needs. */
+export const JUDGE_PROVIDERS = ["anthropic", "openai", "google", "openai-compatible"] as const;
+export type JudgeProvider = (typeof JUDGE_PROVIDERS)[number];
+
+/** How judges reach a model. A judge.json may override provider, model and apiKeyEnv. */
+export type JudgeConfig = {
+  provider: JudgeProvider;
+  /** Required to judge; init writes it empty so the choice is the user's. */
+  model: string;
+  /** The environment variable holding the key. Empty means the provider's conventional one. */
+  apiKeyEnv: string;
+  /** openai-compatible only: where the server is. */
+  baseUrl: string;
+  /** Per context item, per side: a bigger item is refused, never truncated. */
+  maxContextKb: number;
+};
+
 export type Config = {
   baseBranch: string;
   testCommand: string;
@@ -33,9 +53,13 @@ export type Config = {
   setupCommand: string;
   agent: AgentConfig;
   harness: { extraPaths: string[] };
+  judge: JudgeConfig;
+  /** The judges `judge` runs, in this order, by id under `.harnessbench/judges/`. */
+  judges: string[];
 };
 
-const TOP_KEYS = ["baseBranch", "testCommand", "setupCommand", "agent", "harness"] as const;
+const TOP_KEYS = ["baseBranch", "testCommand", "setupCommand", "agent", "harness", "judge", "judges"] as const;
+const JUDGE_KEYS = ["provider", "model", "apiKeyEnv", "baseUrl", "maxContextKb"] as const;
 const AGENT_KEYS = [
   "name",
   "command",
@@ -62,6 +86,14 @@ export function defaults(): Config {
       env: [],
     },
     harness: { extraPaths: [] },
+    judge: {
+      provider: "anthropic",
+      model: "",
+      apiKeyEnv: "",
+      baseUrl: "",
+      maxContextKb: DEFAULT_MAX_CONTEXT_KB,
+    },
+    judges: [...DEFAULT_JUDGES],
   };
 }
 
@@ -154,6 +186,24 @@ function validateAgent(value: unknown, agent: AgentConfig): void {
   agent.env = stringArray(raw, "env", '"agent.env"') ?? agent.env;
 }
 
+function validateJudge(value: unknown, judge: JudgeConfig): void {
+  const raw = object(value, '"judge"');
+  checkKeys(raw, JUDGE_KEYS, "judge.");
+
+  const provider = stringField(raw, "provider", '"judge.provider"');
+  if (provider !== undefined) {
+    if (!(JUDGE_PROVIDERS as readonly string[]).includes(provider)) {
+      fail(`"judge.provider" must be one of ${JUDGE_PROVIDERS.join(", ")}, found "${provider}"`);
+    }
+    judge.provider = provider as JudgeProvider;
+  }
+  judge.model = stringField(raw, "model", '"judge.model"') ?? judge.model;
+  judge.apiKeyEnv = stringField(raw, "apiKeyEnv", '"judge.apiKeyEnv"') ?? judge.apiKeyEnv;
+  judge.baseUrl = stringField(raw, "baseUrl", '"judge.baseUrl"') ?? judge.baseUrl;
+  judge.maxContextKb =
+    positiveNumber(raw, "maxContextKb", '"judge.maxContextKb"') ?? judge.maxContextKb;
+}
+
 /** Checks a parsed config, filling in defaults for anything absent. */
 export function validate(value: unknown): Config {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -177,6 +227,10 @@ export function validate(value: unknown): Config {
     config.harness.extraPaths =
       stringArray(harness, "extraPaths", '"harness.extraPaths"') ?? config.harness.extraPaths;
   }
+
+  // Both absent in configs written before judges existed; those load with the defaults.
+  if (raw["judge"] !== undefined) validateJudge(raw["judge"], config.judge);
+  config.judges = stringArray(raw, "judges", '"judges"') ?? config.judges;
 
   return config;
 }

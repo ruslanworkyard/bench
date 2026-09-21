@@ -8,6 +8,7 @@ import { after, test } from "node:test";
 
 import { CONFIG_FILE, type Config } from "../config.js";
 import { listFixtures, packagedFixturesDir } from "../fixtures.js";
+import { packagedJudgesDir } from "../judges.js";
 import type { Report } from "../print.js";
 
 const CLI = fileURLToPath(new URL("../cli.js", import.meta.url));
@@ -56,6 +57,8 @@ test("init sets up a repository, and a second run changes nothing", () => {
   const root = repo();
   const fixtureIds = listFixtures(packagedFixturesDir()).map((fixture) => fixture.id);
   assert.ok(fixtureIds.length > 0, "the package should ship fixtures");
+  const judgeIds = listFixtures(packagedJudgesDir()).map((judge) => judge.id);
+  assert.deepEqual(judgeIds, ["code-quality", "engineering-practices", "test-quality"]);
 
   const first = runJson(root, "--test", "npm test", "--agent", "claude-code");
 
@@ -67,9 +70,11 @@ test("init sets up a repository, and a second run changes nothing", () => {
     source: "current branch main (no commits yet)",
   });
   assert.deepEqual(first.fixtures, { added: fixtureIds, present: [] });
+  assert.deepEqual(first.judges, { added: judgeIds, present: [] });
   assert.deepEqual(first.files, [
     { path: ".harnessbench", status: "created" },
     { path: ".harnessbench/fixtures", status: "created" },
+    { path: ".harnessbench/judges", status: "created" },
     { path: CONFIG_FILE, status: "created" },
     { path: ".gitignore", status: "appended" },
   ]);
@@ -90,6 +95,8 @@ test("init sets up a repository, and a second run changes nothing", () => {
       env: [],
     },
     harness: { extraPaths: [] },
+    judge: { provider: "anthropic", model: "", apiKeyEnv: "", baseUrl: "", maxContextKb: 512 },
+    judges: ["code-quality", "engineering-practices", "test-quality"],
   });
 
   for (const id of fixtureIds) {
@@ -97,15 +104,24 @@ test("init sets up a repository, and a second run changes nothing", () => {
     const packaged = join(packagedFixturesDir(), id, "fixture.json");
     assert.equal(readFileSync(copied, "utf8"), readFileSync(packaged, "utf8"));
   }
+  for (const id of judgeIds) {
+    for (const file of ["judge.json", "prompt.md"]) {
+      const copied = join(root, ".harnessbench", "judges", id, file);
+      const packaged = join(packagedJudgesDir(), id, file);
+      assert.equal(readFileSync(copied, "utf8"), readFileSync(packaged, "utf8"));
+    }
+  }
 
   assert.equal(readFileSync(join(root, ".gitignore"), "utf8"), "node_modules/\n.harnessbench/runs/\n");
 
   const second = runJson(root, "--test", "npm test", "--agent", "claude-code");
 
   assert.deepEqual(second.fixtures, { added: [], present: fixtureIds });
+  assert.deepEqual(second.judges, { added: [], present: judgeIds });
   assert.deepEqual(second.files, [
     { path: ".harnessbench", status: "present" },
     { path: ".harnessbench/fixtures", status: "present" },
+    { path: ".harnessbench/judges", status: "present" },
     { path: CONFIG_FILE, status: "skipped" },
     { path: ".gitignore", status: "present" },
   ]);
@@ -179,7 +195,22 @@ test("the human summary reports what was found and what to do next", () => {
   assert.match(output, /Test command\s+npm test\s+--test flag/);
   assert.match(output, /Setup command\s+none detected \(set setupCommand if the agent needs dependencies installed\)/);
   assert.match(output, /Base branch\s+main\s+current branch main/);
+  assert.match(output, /Judges\s+added: code-quality, engineering-practices, test-quality/);
   assert.match(output, /Next: harnessbench run/);
+});
+
+test("a judge the repository already has is left alone; the others are still copied", () => {
+  const root = repo();
+  const own = join(root, ".harnessbench", "judges", "code-quality");
+  execFileSync("mkdir", ["-p", own]);
+  writeFileSync(join(own, "prompt.md"), "my own rubric\n", "utf8");
+
+  const report = runJson(root, "--test", "npm test");
+
+  assert.deepEqual(report.judges, { added: ["engineering-practices", "test-quality"], present: ["code-quality"] });
+  assert.equal(readFileSync(join(own, "prompt.md"), "utf8"), "my own rubric\n");
+  assert.ok(!existsSync(join(own, "judge.json")));
+  assert.ok(existsSync(join(root, ".harnessbench", "judges", "test-quality", "judge.json")));
 });
 
 test("an unknown --agent is refused, so no config that cannot run is written", () => {

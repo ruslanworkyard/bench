@@ -3,12 +3,23 @@ import { join, sep } from "node:path";
 
 import { getAdapter } from "./agents/index.js";
 import type { AgentAdapter } from "./agents/types.js";
-import { CONFIG_FILE, FIXTURES_DIR, load, type AgentConfig, type Config } from "./config.js";
+import {
+  CONFIG_FILE,
+  FIXTURES_DIR,
+  JUDGES_DIR,
+  JUDGE_PROVIDERS,
+  load,
+  type AgentConfig,
+  type Config,
+  type JudgeConfig,
+  type JudgeProvider,
+} from "./config.js";
 import { agentPath, isExecutable } from "./detect/agents.js";
 import { git, mergeBase, repoRoot } from "./detect/git.js";
 import { harnessSnapshot, type HarnessSnapshot } from "./detect/harness.js";
 import { CliError } from "./errors.js";
 import { listFixtures, validateFixture, type FixtureMeta } from "./fixtures.js";
+import type { LoadedJudge } from "./judges.js";
 
 /**
  * The checks every command that actually runs something shares. Each one either
@@ -146,4 +157,81 @@ export function requireFixture(root: string, id: string): LoadedFixture {
     throw new CliError(`fixture '${id}' has no prompt.md`, 1);
   }
   return { dir, fixture, prompt: readFileSync(promptPath, "utf8") };
+}
+
+/** Environment overrides for every judge at once; they beat judge.json, which beats the config. */
+export const JUDGE_PROVIDER_ENV = "HARNESSBENCH_JUDGE_PROVIDER";
+export const JUDGE_MODEL_ENV = "HARNESSBENCH_JUDGE_MODEL";
+
+/** Where each provider looks for its key when the config names no variable. */
+const CONVENTIONAL_KEY_ENV: Record<JudgeProvider, string> = {
+  anthropic: "ANTHROPIC_API_KEY",
+  openai: "OPENAI_API_KEY",
+  google: "GOOGLE_GENERATIVE_AI_API_KEY",
+  "openai-compatible": "OPENAI_API_KEY",
+};
+
+/** Everything `judge/provider.ts` needs to build a model, with every override applied. */
+export type ResolvedJudge = {
+  provider: JudgeProvider;
+  model: string;
+  /** The variable the key is read from at call time. Only its name lives here. */
+  apiKeyEnv: string;
+  baseUrl: string;
+};
+
+/**
+ * Provider, model and key variable for one judge: environment > judge.json > config, then
+ * the provider's conventional variable for a key nobody named. A judge with no model after
+ * all that cannot run, and the error says where to set one.
+ */
+export function requireJudgeModel(
+  judge: LoadedJudge,
+  config: JudgeConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): ResolvedJudge {
+  const id = judge.meta.id;
+  const judgeFile = `${JUDGES_DIR}/${id}/judge.json`;
+
+  const providerName = env[JUDGE_PROVIDER_ENV] || judge.meta.provider || config.provider;
+  if (!(JUDGE_PROVIDERS as readonly string[]).includes(providerName)) {
+    throw new CliError(
+      `${JUDGE_PROVIDER_ENV} is '${providerName}'; judge providers are ${JUDGE_PROVIDERS.join(", ")}`,
+      1,
+    );
+  }
+  const provider = providerName as JudgeProvider;
+
+  const model = env[JUDGE_MODEL_ENV] || judge.meta.model || config.model;
+  if (model === "") {
+    throw new CliError(
+      `judge '${id}' has no model: set "judge.model" in ${CONFIG_FILE}, "model" in ${judgeFile}, ` +
+        `or ${JUDGE_MODEL_ENV}`,
+      1,
+    );
+  }
+
+  if (provider === "openai-compatible" && config.baseUrl === "") {
+    throw new CliError(
+      `judge '${id}' uses the openai-compatible provider, which needs "judge.baseUrl" in ${CONFIG_FILE}`,
+      1,
+    );
+  }
+
+  const apiKeyEnv = judge.meta.apiKeyEnv || config.apiKeyEnv || CONVENTIONAL_KEY_ENV[provider];
+  return { provider, model, apiKeyEnv, baseUrl: config.baseUrl };
+}
+
+/** The key stays in the environment: this checks only that the variable is set. */
+export function requireJudgeKey(
+  judge: LoadedJudge,
+  resolved: ResolvedJudge,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if ((env[resolved.apiKeyEnv] ?? "") !== "") return;
+  throw new CliError(
+    `no API key for judge '${judge.meta.id}' (${resolved.provider}): set ${resolved.apiKeyEnv}, ` +
+      `or name another variable in "judge.apiKeyEnv" in ${CONFIG_FILE}`,
+    1,
+  );
 }

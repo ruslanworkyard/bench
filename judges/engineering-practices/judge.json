@@ -1,0 +1,7 @@
+{
+  "id": "engineering-practices",
+  "title": "Engineering practices",
+  "description": "Whether the work was done the way a careful engineer works: scope, verification, method",
+  "prompt": "prompt.md",
+  "context": ["prompt", "diff", "toolLog"]
+}

@@ -1,0 +1,7 @@
+{
+  "id": "code-quality",
+  "title": "Code quality",
+  "description": "The quality of the code as written, read as a reviewer would",
+  "prompt": "prompt.md",
+  "context": ["prompt", "diff"]
+}

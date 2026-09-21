@@ -36,6 +36,32 @@ test("a config without setupCommand loads as no setup; with it, the command roun
   rejects({ setupCommand: ["npm", "ci"] }, /"setupCommand" must be a string, found an array/);
 });
 
+test("a config without a judge block loads with the judge defaults; a full block round-trips", () => {
+  const older = validate({ baseBranch: "main", testCommand: "npm test" });
+  assert.deepEqual(older.judge, { provider: "anthropic", model: "", apiKeyEnv: "", baseUrl: "", maxContextKb: 512 });
+  assert.deepEqual(older.judges, ["code-quality", "engineering-practices", "test-quality"]);
+
+  const judge = {
+    provider: "openai-compatible",
+    model: "llama-3.3-70b",
+    apiKeyEnv: "LOCAL_KEY",
+    baseUrl: "http://localhost:11434/v1",
+    maxContextKb: 64,
+  };
+  assert.deepEqual(validate({ judge, judges: ["code-quality"] }).judge, judge);
+  assert.deepEqual(validate({ judge, judges: ["code-quality"] }).judges, ["code-quality"]);
+  assert.deepEqual(validate({ judges: [] }).judges, []);
+});
+
+test("the judge block's types are checked", () => {
+  rejects({ judge: "anthropic" }, /"judge" must be an object, found a string/);
+  rejects({ judge: { provider: "bedrock" } }, /"judge\.provider" must be one of anthropic, openai, google, openai-compatible, found "bedrock"/);
+  rejects({ judge: { model: null } }, /"judge\.model" must be a string, found null/);
+  rejects({ judge: { maxContextKb: 0 } }, /"judge\.maxContextKb" must be a positive number/);
+  rejects({ judge: { baseURL: "x" } }, /unknown key "judge\.baseURL"/);
+  rejects({ judges: "code-quality" }, /"judges" must be an array of strings/);
+});
+
 test("a full agent block survives validation unchanged", () => {
   const agent = {
     name: "claude-code",
