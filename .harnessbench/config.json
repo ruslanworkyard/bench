@@ -13,5 +13,13 @@
   },
   "harness": {
     "extraPaths": []
-  }
+  },
+  "judge": {
+    "provider": "openai-compatible",
+    "model": "z-ai/glm-5.3-flash",
+    "apiKeyEnv": "OPENROUTER_API_KEY",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "maxContextKb": 512
+  },
+  "judges": ["code-quality", "engineering-practices", "test-quality"]
 }
