@@ -3,7 +3,9 @@ import { compare } from "./commands/compare.js";
 import { init } from "./commands/init.js";
 import { judge } from "./commands/judge.js";
 import { run } from "./commands/run.js";
+import { loadEnvFile } from "./env.js";
 import { CliError } from "./errors.js";
+import { requireGit, requireRepo } from "./preflight.js";
 
 const VALUE_FLAGS = new Set(["base", "test", "setup", "agent", "max-turns", "model", "fixture"]);
 const BOOLEAN_FLAGS = new Set(["dry-run", "json", "keep", "markdown", "judge", "help"]);
@@ -92,6 +94,15 @@ function positiveInteger(flags: Flags, name: string): number | undefined {
   return parsed;
 }
 
+/**
+ * Credentials from `.harnessbench/.env`, for every command that could need them, before
+ * any preflight looks for them. init is left out: it may run before the repository has one.
+ */
+function loadCredentials(): void {
+  requireGit();
+  loadEnvFile(requireRepo(process.cwd()));
+}
+
 /** What the shell learns from a run: the agent's outcome, never the test suite's. */
 const RUN_EXIT_CODES = { completed: 0, timeout: 2, error: 3, max_turns: 4 } as const;
 
@@ -119,6 +130,7 @@ async function main(argv: string[]): Promise<number> {
     if (fixtureId === undefined) {
       throw new CliError(`run needs a fixture id\n\n${HELP}`, 2);
     }
+    loadCredentials();
     const records = await run({
       cwd: process.cwd(),
       fixtureId,
@@ -140,6 +152,7 @@ async function main(argv: string[]): Promise<number> {
     if (ids.length === 0 && value(flags, "fixture") === undefined) {
       throw new CliError(`judge needs two run ids, or --fixture <id>\n\n${HELP}`, 2);
     }
+    loadCredentials();
     await judge({
       cwd: process.cwd(),
       runIds: ids.length === 2 ? (ids as [string, string]) : undefined,
@@ -159,6 +172,7 @@ async function main(argv: string[]): Promise<number> {
     if (flags["json"] === true && flags["markdown"] === true) {
       throw new CliError("--json and --markdown are exclusive; pick one", 2);
     }
+    loadCredentials();
     compare({
       cwd: process.cwd(),
       runIds: ids.length === 2 ? (ids as [string, string]) : undefined,

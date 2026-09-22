@@ -23,7 +23,7 @@ test("apply performs every kind of op", () => {
   const ops: FileOp[] = [
     { kind: "mkdir", path: join(root, "state", "fixtures") },
     { kind: "write", path: join(root, "state", "config.json"), content: "{}\n" },
-    { kind: "appendLine", path: join(root, ".gitignore"), line: "state/runs/" },
+    { kind: "appendLines", path: join(root, ".gitignore"), lines: ["state/runs/", "state/.env"] },
   ];
 
   const applied = apply(ops, { dryRun: false });
@@ -34,7 +34,7 @@ test("apply performs every kind of op", () => {
   );
   assert.ok(existsSync(join(root, "state", "fixtures")));
   assert.equal(readFileSync(join(root, "state", "config.json"), "utf8"), "{}\n");
-  assert.equal(readFileSync(join(root, ".gitignore"), "utf8"), "state/runs/\n");
+  assert.equal(readFileSync(join(root, ".gitignore"), "utf8"), "state/runs/\nstate/.env\n");
 });
 
 test("write never clobbers an existing file", () => {
@@ -48,11 +48,11 @@ test("write never clobbers an existing file", () => {
   assert.equal(readFileSync(path, "utf8"), "mine\n");
 });
 
-test("mkdir and appendLine are idempotent", () => {
+test("mkdir and appendLines are idempotent", () => {
   const root = tempDir();
   const ops: FileOp[] = [
     { kind: "mkdir", path: join(root, "state") },
-    { kind: "appendLine", path: join(root, ".gitignore"), line: "state/runs/" },
+    { kind: "appendLines", path: join(root, ".gitignore"), lines: ["state/runs/"] },
   ];
   apply(ops, { dryRun: false });
 
@@ -65,14 +65,25 @@ test("mkdir and appendLine are idempotent", () => {
   assert.equal(readFileSync(join(root, ".gitignore"), "utf8"), "state/runs/\n");
 });
 
-test("appendLine adds the missing newline of a file that lacks one", () => {
+test("appendLines adds the missing newline of a file that lacks one", () => {
   const root = tempDir();
   const path = join(root, ".gitignore");
   writeFileSync(path, "node_modules/\ndist/", "utf8");
 
-  apply([{ kind: "appendLine", path, line: "state/runs/" }], { dryRun: false });
+  apply([{ kind: "appendLines", path, lines: ["state/runs/"] }], { dryRun: false });
 
   assert.equal(readFileSync(path, "utf8"), "node_modules/\ndist/\nstate/runs/\n");
+});
+
+test("appendLines adds only the lines a file lacks, and reports that as appended", () => {
+  const root = tempDir();
+  const path = join(root, ".gitignore");
+  writeFileSync(path, "node_modules/\nstate/runs/\n", "utf8");
+
+  const [applied] = apply([{ kind: "appendLines", path, lines: ["state/runs/", "state/.env"] }], { dryRun: false });
+
+  assert.equal(applied?.status, "appended");
+  assert.equal(readFileSync(path, "utf8"), "node_modules/\nstate/runs/\nstate/.env\n");
 });
 
 test("dryRun reports the same statuses but writes nothing", () => {
@@ -80,7 +91,7 @@ test("dryRun reports the same statuses but writes nothing", () => {
   const ops: FileOp[] = [
     { kind: "mkdir", path: join(root, "state") },
     { kind: "write", path: join(root, "state", "config.json"), content: "{}\n" },
-    { kind: "appendLine", path: join(root, ".gitignore"), line: "state/runs/" },
+    { kind: "appendLines", path: join(root, ".gitignore"), lines: ["state/runs/"] },
   ];
 
   const applied = apply(ops, { dryRun: true });

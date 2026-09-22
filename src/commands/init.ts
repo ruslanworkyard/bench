@@ -1,9 +1,12 @@
 import { existsSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
-import { adapterForCommand, getAdapter } from "../agents/index.js";
+import { adapterForCommand, adapterNames, getAdapter } from "../agents/index.js";
+import type { AgentAdapter } from "../agents/types.js";
 import {
   CONFIG_FILE,
+  ENV_EXAMPLE_FILE,
+  ENV_FILE,
   FIXTURES_DIR,
   JUDGES_DIR,
   RUNS_DIR,
@@ -22,7 +25,7 @@ import type { Detection } from "../detect/types.js";
 import { copyOps, listFixtures, packagedFixturesDir } from "../fixtures.js";
 import { packagedJudgesDir } from "../judges.js";
 import { apply, type FileOp } from "../plan.js";
-import { requireGit, requireRepo } from "../preflight.js";
+import { judgeKeyEnv, requireGit, requireRepo } from "../preflight.js";
 import { formatJson, formatSummary, type FileReport, type Report } from "../print.js";
 
 export type InitOptions = {
@@ -58,6 +61,41 @@ function detectAgent(agents: Detection<string[]> | null): Detection<string> | nu
 
 function display(root: string, path: string): string {
   return relative(root, path).split(sep).join("/");
+}
+
+/** One line per credential variable, for .env.example. A name not listed gets a generic one. */
+const CREDENTIAL_NOTES: Record<string, string> = {
+  ANTHROPIC_API_KEY: "Anthropic API key: for Claude Code, and for judges on the anthropic provider",
+  ANTHROPIC_AUTH_TOKEN: "Bearer token for an Anthropic-compatible gateway, in place of an API key",
+  CLAUDE_CODE_OAUTH_TOKEN: "Claude subscription token from `claude setup-token`, in place of an API key",
+  CLAUDE_CODE_USE_BEDROCK: "Set to 1 to reach Claude through AWS Bedrock; AWS credentials come from your environment",
+  CLAUDE_CODE_USE_VERTEX: "Set to 1 to reach Claude through Google Vertex AI",
+  OPENAI_API_KEY: "OpenAI API key: for judges on the openai and openai-compatible providers",
+  GOOGLE_GENERATIVE_AI_API_KEY: "Google AI API key: for judges on the google provider",
+};
+
+/**
+ * The variables the configured agent and judge could use, every one commented out, so the
+ * file tracks the config without ever holding a value. Never overwritten once it exists.
+ */
+function envExample(adapter: AgentAdapter | null, judgeKey: string): string {
+  const notes = new Map<string, string>();
+  for (const name of adapter?.credentialEnv ?? []) {
+    notes.set(name, CREDENTIAL_NOTES[name] ?? `Credential for the ${adapter?.name} agent`);
+  }
+  if (!notes.has("CLAUDE_CODE_OAUTH_TOKEN")) {
+    notes.set("CLAUDE_CODE_OAUTH_TOKEN", CREDENTIAL_NOTES["CLAUDE_CODE_OAUTH_TOKEN"] as string);
+  }
+  if (!notes.has(judgeKey)) {
+    notes.set(judgeKey, CREDENTIAL_NOTES[judgeKey] ?? `API key for the judge ("judge.apiKeyEnv" in ${CONFIG_FILE})`);
+  }
+  const lines = [
+    `# Credentials harnessbench could use, from the agent and judge in ${CONFIG_FILE}.`,
+    `# Copy this file to ${ENV_FILE} (gitignored), uncomment what you use, and fill in the values.`,
+    "# A variable already set in your shell wins over the file.",
+  ];
+  for (const [name, note] of notes) lines.push("", `# ${note}`, `# ${name}=`);
+  return `${lines.join("\n")}\n`;
 }
 
 type Catalogue = { added: string[]; present: string[]; ops: FileOp[] };
@@ -109,13 +147,23 @@ export function init(options: InitOptions): void {
     },
   };
 
+  // The config that will be in effect: an existing one is kept, so .env.example follows it.
+  const effective = existing ?? config;
+  const effectiveAdapter =
+    adapter ?? (adapterNames().includes(effective.agent.name) ? getAdapter(effective.agent.name) : null);
+
   // Plan.
   const core: FileOp[] = [
     { kind: "mkdir", path: join(root, STATE_DIR) },
     { kind: "mkdir", path: join(root, FIXTURES_DIR) },
     { kind: "mkdir", path: join(root, JUDGES_DIR) },
     saveOp(root, config),
-    { kind: "appendLine", path: join(root, ".gitignore"), line: `${RUNS_DIR}/` },
+    {
+      kind: "write",
+      path: join(root, ENV_EXAMPLE_FILE),
+      content: envExample(effectiveAdapter, judgeKeyEnv(effective.judge)),
+    },
+    { kind: "appendLines", path: join(root, ".gitignore"), lines: [`${RUNS_DIR}/`, ENV_FILE] },
   ];
 
   const fixtures = copyCatalogue(packagedFixturesDir(), join(root, FIXTURES_DIR));

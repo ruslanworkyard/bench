@@ -5,6 +5,7 @@ import { getAdapter } from "./agents/index.js";
 import type { AgentAdapter } from "./agents/types.js";
 import {
   CONFIG_FILE,
+  ENV_FILE,
   FIXTURES_DIR,
   JUDGES_DIR,
   JUDGE_PROVIDERS,
@@ -116,6 +117,9 @@ export function requireAgentCommand(
   return path;
 }
 
+/** Where a credential may be set: the shell, or the file cli.ts has already read into it. */
+const WHERE_TO_SET = `in your environment or in ${ENV_FILE}`;
+
 /** Credentials stay in the environment: harnessbench never reads, stores or prints them. */
 export function requireCredentials(
   adapter: AgentAdapter,
@@ -124,7 +128,7 @@ export function requireCredentials(
   const set = adapter.credentialEnv.some((name) => (env[name] ?? "") !== "");
   if (!set) {
     throw new CliError(
-      `no credentials for ${adapter.name}: set one of ${adapter.credentialEnv.join(", ")}`,
+      `no credentials for ${adapter.name}: set one of ${adapter.credentialEnv.join(", ")} ${WHERE_TO_SET}`,
       1,
     );
   }
@@ -170,6 +174,11 @@ const CONVENTIONAL_KEY_ENV: Record<JudgeProvider, string> = {
   google: "GOOGLE_GENERATIVE_AI_API_KEY",
   "openai-compatible": "OPENAI_API_KEY",
 };
+
+/** The variable a judge's key is read from when its judge.json names none; init lists it. */
+export function judgeKeyEnv(config: JudgeConfig, provider: JudgeProvider = config.provider): string {
+  return config.apiKeyEnv || CONVENTIONAL_KEY_ENV[provider];
+}
 
 /** Everything `judge/provider.ts` needs to build a model, with every override applied. */
 export type ResolvedJudge = {
@@ -218,7 +227,7 @@ export function requireJudgeModel(
     );
   }
 
-  const apiKeyEnv = judge.meta.apiKeyEnv || config.apiKeyEnv || CONVENTIONAL_KEY_ENV[provider];
+  const apiKeyEnv = judge.meta.apiKeyEnv || judgeKeyEnv(config, provider);
   return { provider, model, apiKeyEnv, baseUrl: config.baseUrl };
 }
 
@@ -230,8 +239,8 @@ export function requireJudgeKey(
 ): void {
   if ((env[resolved.apiKeyEnv] ?? "") !== "") return;
   throw new CliError(
-    `no API key for judge '${judge.meta.id}' (${resolved.provider}): set ${resolved.apiKeyEnv}, ` +
-      `or name another variable in "judge.apiKeyEnv" in ${CONFIG_FILE}`,
+    `no API key for judge '${judge.meta.id}' (${resolved.provider}): set ${resolved.apiKeyEnv} ` +
+      `${WHERE_TO_SET}, or name another variable in "judge.apiKeyEnv" in ${CONFIG_FILE}`,
     1,
   );
 }

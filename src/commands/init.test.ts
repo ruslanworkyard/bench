@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 
-import { CONFIG_FILE, type Config } from "../config.js";
+import { CONFIG_FILE, ENV_EXAMPLE_FILE, type Config } from "../config.js";
 import { listFixtures, packagedFixturesDir } from "../fixtures.js";
 import { packagedJudgesDir } from "../judges.js";
 import type { Report } from "../print.js";
@@ -76,6 +76,7 @@ test("init sets up a repository, and a second run changes nothing", () => {
     { path: ".harnessbench/fixtures", status: "created" },
     { path: ".harnessbench/judges", status: "created" },
     { path: CONFIG_FILE, status: "created" },
+    { path: ENV_EXAMPLE_FILE, status: "created" },
     { path: ".gitignore", status: "appended" },
   ]);
   assert.equal(first.dryRun, false);
@@ -112,7 +113,10 @@ test("init sets up a repository, and a second run changes nothing", () => {
     }
   }
 
-  assert.equal(readFileSync(join(root, ".gitignore"), "utf8"), "node_modules/\n.harnessbench/runs/\n");
+  assert.equal(
+    readFileSync(join(root, ".gitignore"), "utf8"),
+    "node_modules/\n.harnessbench/runs/\n.harnessbench/.env\n",
+  );
 
   const second = runJson(root, "--test", "npm test", "--agent", "claude-code");
 
@@ -123,8 +127,67 @@ test("init sets up a repository, and a second run changes nothing", () => {
     { path: ".harnessbench/fixtures", status: "present" },
     { path: ".harnessbench/judges", status: "present" },
     { path: CONFIG_FILE, status: "skipped" },
+    { path: ENV_EXAMPLE_FILE, status: "skipped" },
     { path: ".gitignore", status: "present" },
   ]);
+  assert.equal(
+    readFileSync(join(root, ".gitignore"), "utf8"),
+    "node_modules/\n.harnessbench/runs/\n.harnessbench/.env\n",
+    "the second init adds nothing to .gitignore",
+  );
+});
+
+test("a repository initialised before .env existed gets the gitignore line on the next init", () => {
+  const root = repo();
+  writeFileSync(join(root, ".gitignore"), "node_modules/\n.harnessbench/runs/\n", "utf8");
+
+  const report = runJson(root, "--test", "npm test", "--agent", "claude-code");
+
+  assert.ok(report.files.some((file) => file.path === ".gitignore" && file.status === "appended"));
+  assert.equal(
+    readFileSync(join(root, ".gitignore"), "utf8"),
+    "node_modules/\n.harnessbench/runs/\n.harnessbench/.env\n",
+  );
+});
+
+test(".env.example lists the agent's and judge's variables, every line a comment, and is never overwritten", () => {
+  const root = repo();
+  run(root, "--test", "npm test", "--agent", "claude-code");
+
+  const example = readFileSync(join(root, ENV_EXAMPLE_FILE), "utf8");
+  for (const line of example.split("\n")) {
+    assert.ok(line === "" || line.startsWith("#"), `not a comment: ${JSON.stringify(line)}`);
+  }
+  const names = [...example.matchAll(/^# ([A-Z_]+)=$/gm)].map((match) => match[1]);
+  assert.deepEqual(names, [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+  ]);
+  assert.match(example, /claude setup-token/);
+
+  writeFileSync(join(root, ENV_EXAMPLE_FILE), "# mine\n", "utf8");
+  const second = runJson(root, "--test", "npm test", "--agent", "claude-code");
+  assert.ok(second.files.some((file) => file.path === ENV_EXAMPLE_FILE && file.status === "skipped"));
+  assert.equal(readFileSync(join(root, ENV_EXAMPLE_FILE), "utf8"), "# mine\n");
+});
+
+test(".env.example follows the judge in an existing config", () => {
+  const root = repo();
+  run(root, "--test", "npm test", "--agent", "claude-code");
+  const path = join(root, CONFIG_FILE);
+  const config = JSON.parse(readFileSync(path, "utf8")) as Config;
+  config.judge.provider = "openai";
+  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  rmSync(join(root, ENV_EXAMPLE_FILE));
+
+  run(root, "--test", "npm test", "--agent", "claude-code");
+
+  const example = readFileSync(join(root, ENV_EXAMPLE_FILE), "utf8");
+  assert.match(example, /^# OPENAI_API_KEY=$/m);
+  assert.match(example, /^# ANTHROPIC_API_KEY=$/m, "the agent's variables are still listed");
 });
 
 test("a lockfile gives the config its setup command; --setup overrides it", () => {
@@ -196,6 +259,7 @@ test("the human summary reports what was found and what to do next", () => {
   assert.match(output, /Setup command\s+none detected \(set setupCommand if the agent needs dependencies installed\)/);
   assert.match(output, /Base branch\s+main\s+current branch main/);
   assert.match(output, /Judges\s+added: code-quality, engineering-practices, test-quality/);
+  assert.match(output, /^credentials: \.harnessbench\/\.env \(gitignored; see \.env\.example\)$/m);
   assert.match(output, /Next: harnessbench run/);
 });
 

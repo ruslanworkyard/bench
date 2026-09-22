@@ -183,6 +183,7 @@ test("requireCredentials accepts any one of the agent's variables, and names the
     /no credentials for claude-code: set one of/,
   );
   for (const name of claudeCode.credentialEnv) assert.match(error.message, new RegExp(name));
+  assert.match(error.message, /in your environment or in \.harnessbench\/\.env/);
 });
 
 test("requireBaseBranch resolves an existing branch to a sha", () => {
@@ -310,4 +311,5 @@ test("requireJudgeKey checks only that the variable is set, and names it when it
   requireJudgeKey(judge(), resolved, { ANTHROPIC_API_KEY: "sk-test" });
   const error = cliError(() => requireJudgeKey(judge(), resolved, { ANTHROPIC_API_KEY: "" }), /no API key for judge 'code-quality' \(anthropic\): set ANTHROPIC_API_KEY/);
   assert.match(error.message, /"judge\.apiKeyEnv"/);
+  assert.match(error.message, /set ANTHROPIC_API_KEY in your environment or in \.harnessbench\/\.env/);
 });

@@ -41,7 +41,12 @@ Goal: an open-source npm package (`npx harnessbench`) people adopt. Quality over
   preflight only checks that one of the adapter's `credentialEnv` names is set, and the
   adapter forwards the ones on its `forwardEnv` list. The agent gets nothing else: its config
   directory is inside the workspace, so the user's own `~/.claude` is neither read nor written.
-- **Single npm package**, TypeScript, ESM, Node >= 20. No runtime dependencies except the model
+  The one file that may hold a key is `.harnessbench/.env` (gitignored by `init`): `env.ts`
+  reads it into `process.env` with `util.parseEnv` before any preflight, never overriding a
+  variable the shell already set, so CI is untouched. Nothing prints its values; a malformed
+  line is reported by number. Not built, on purpose: encryption, `.env.ci`-style variants,
+  reading the host project's own `.env`.
+- **Single npm package**, TypeScript, ESM, Node >= 20.12 (`util.parseEnv`). No runtime dependencies except the model
   layer used by judges: `ai` with `@ai-sdk/anthropic`, `@ai-sdk/openai`, `@ai-sdk/google`,
   `@ai-sdk/openai-compatible`, and `zod` for the verdict schema, all pinned to exact versions.
   Nothing outside `src/judge/` imports them (tests may import `ai/test` for the mock model).
@@ -62,6 +67,9 @@ Goal: an open-source npm package (`npx harnessbench`) people adopt. Quality over
   CLAUDE.md, .claude/, AGENTS.md, ...   the harness — read, never written
   .harnessbench/
     config.json                         written by init, committed
+    .env                                credentials, KEY=value; gitignored by init, never written by the tool
+    .env.example                        written by init once, committed: the variables the configured
+                                        agent and judge could use, all commented out
     fixtures/<id>/                      fixture.json + prompt.md, committed; built-ins are copied here
     judges/<id>/                        judge.json + prompt.md, committed; built-ins are copied here
     runs/<ts>-<fixture>-<env>/          one run, gitignored: run.json, raw.jsonl, transcript.jsonl,
@@ -88,7 +96,7 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
 | `agents/` | drive one external agent | `run(AgentRequest): Promise<AgentResult>` — returns every outcome, throws for none |
 | `judge/` | ask a model one question | `context.ts` (pure: pair → text), `provider.ts` (the only file that knows the AI SDK packages), `judge.ts` (`Judge` interface, `modelJudge`) |
 | `commands/` | compose the above, in order | init: detect → plan → apply → print; run: preflight → workspace → agent → record → print; judge: pair → refusals → context → model → record → print |
-| `cli.ts` | argv, exit codes | nothing else |
+| `cli.ts` | argv, exit codes; reads `.harnessbench/.env` (`env.ts`) for run/judge/compare before they preflight | nothing else |
 
 **Domain nouns** — an object that appears in several layers gets its own top-level file:
 - `config.ts` — `Config` type (`baseBranch`, `testCommand`, `setupCommand`, the `agent` block,
@@ -165,6 +173,11 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
   replaces an earlier one for the same stamp. `JudgeRecord` (`schema: 1`) lives here, like
   `Comparison` lives in `compare.ts`. `deps.judgeFor(target)` is the seam tests use to hand in
   `ai/test`'s `MockLanguageModelV4`; `cli.ts` passes nothing.
+- `env.ts` — `loadEnvFile(root, env = process.env): string[]`: `.harnessbench/.env` via
+  `util.parseEnv`, set-if-unset, returns the names it set (tests only). Missing file → `[]`;
+  unreadable or malformed → `CliError` naming the file and a line number, never a value.
+  `parseEnv` itself never throws, so `malformedLine` finds the first line that is not an
+  entry, comment, blank or the tail of a multi-line quoted value.
 - `errors.ts` — `CliError`, the shared vocabulary at the bottom of the graph.
 
 Imports form a DAG, checked by eye: `detect/*` imports nothing internal but `detect/types.ts`;
@@ -215,8 +228,13 @@ a fake shell script stands in, so the suite is free, offline and deterministic.
 - `init`: detects git root and base branch (`origin/HEAD` → main → master), harness files
   (conventions + followed `@imports` and markdown links), test command (npm/pytest/go/cargo/
   make/phpunit/gradle/mvn; ignores npm's placeholder), agent CLIs on PATH. Writes
-  `.harnessbench/config.json`, copies built-in fixtures, appends `.harnessbench/runs/` to
-  `.gitignore`. Idempotent. `--dry-run`, `--json`, `--base`, `--test`, `--agent`.
+  `.harnessbench/config.json`, copies built-in fixtures, appends `.harnessbench/runs/` and
+  `.harnessbench/.env` to `.gitignore` (one `appendLines` op, so a repo initialised before
+  the second line existed gets it on the next init), writes `.harnessbench/.env.example` once
+  (from the effective config's adapter `credentialEnv` + `CLAUDE_CODE_OAUTH_TOKEN` + the
+  judge's `judgeKeyEnv`, each with a one-line note from a table in `commands/init.ts`), and
+  prints `credentials: .harnessbench/.env (gitignored; see .env.example)`. Idempotent.
+  `--dry-run`, `--json`, `--base`, `--test`, `--agent`.
 - Built-in fixtures: `announcements` (new table, write/read, tests), `holiday-api-client`
   (HTTP client to fictional `api.holidaze.example` with mocked tests, retries, typed errors),
   `ttl-cache` (TTL+LRU cache applied to one expensive read).
@@ -356,6 +374,11 @@ a fake shell script stands in, so the suite is free, offline and deterministic.
   after both sides ran (spec'd that way; cheap to add if it bites). Usage per verdict is
   summed over attempts. Not built: judge rows in `compare`, position swap, per-judge
   concurrency, a real call to a real provider.
+
+- `.harnessbench/.env` (2026-09-22). See the credentials decision above and `env.ts`. Credential
+  errors in `preflight.ts` now end "set X in your environment or in .harnessbench/.env".
+  `engines.node` is `>=20.12`. `plan.ts`'s `appendLine` became `appendLines` so one
+  `.gitignore` op manages both lines and the Files report shows the file once.
 
 ## Next
 

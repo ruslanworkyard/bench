@@ -9,6 +9,10 @@ export const FIXTURES_DIR = `${STATE_DIR}/fixtures`;
 export const JUDGES_DIR = `${STATE_DIR}/judges`;
 export const RUNS_DIR = `${STATE_DIR}/runs`;
 export const CONFIG_FILE = `${STATE_DIR}/config.json`;
+/** Credentials for a laptop: gitignored by init, read into the environment before preflight. */
+export const ENV_FILE = `${STATE_DIR}/.env`;
+/** The variables the configured agent and judge could use, commented out; committed. */
+export const ENV_EXAMPLE_FILE = `${STATE_DIR}/.env.example`;
 
 export const DEFAULT_BASE_BRANCH = "main";
 export const DEFAULT_TIMEOUT_MINUTES = 20;

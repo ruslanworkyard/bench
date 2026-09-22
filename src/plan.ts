@@ -5,7 +5,7 @@ import { dirname } from "node:path";
 export type FileOp =
   | { kind: "mkdir"; path: string }
   | { kind: "write"; path: string; content: string }
-  | { kind: "appendLine"; path: string; line: string };
+  | { kind: "appendLines"; path: string; lines: readonly string[] };
 
 export type OpStatus = "created" | "skipped" | "present" | "appended";
 
@@ -29,14 +29,14 @@ function applyOne(op: FileOp, dryRun: boolean): OpStatus {
       }
       return "created";
     }
-    case "appendLine": {
+    case "appendLines": {
       const existing = existsSync(op.path) ? readFileSync(op.path, "utf8") : null;
-      if (existing !== null && existing.split("\n").some((line) => line.trim() === op.line)) {
-        return "present";
-      }
+      const present = new Set((existing ?? "").split("\n").map((line) => line.trim()));
+      const missing = op.lines.filter((line) => !present.has(line));
+      if (missing.length === 0) return "present";
       if (!dryRun) {
         const separator = existing === null || existing === "" || existing.endsWith("\n") ? "" : "\n";
-        appendFileSync(op.path, `${separator}${op.line}\n`, "utf8");
+        appendFileSync(op.path, `${separator}${missing.join("\n")}\n`, "utf8");
       }
       return "appended";
     }

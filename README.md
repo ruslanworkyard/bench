@@ -51,7 +51,7 @@ Runs are content-addressed by fixture, base commit, harness hash, agent and mode
 npx harnessbench init
 ```
 
-`init` inspects the current git repository, detects your harness files (`CLAUDE.md`, `.claude/`, `AGENTS.md`, `.mcp.json` and anything they reference), your test command, your setup command (from the lockfile: `package-lock.json` means `npm ci`, `go.sum` means `go mod download`, and so on; a manifest without a lockfile is not enough), your base branch and which agents are installed, then writes `.harnessbench/config.json` you can edit and copies the starter fixtures into `.harnessbench/fixtures/`. Run it with `--dry-run` first to see what it would do, or `--json` for machine-readable output.
+`init` inspects the current git repository, detects your harness files (`CLAUDE.md`, `.claude/`, `AGENTS.md`, `.mcp.json` and anything they reference), your test command, your setup command (from the lockfile: `package-lock.json` means `npm ci`, `go.sum` means `go mod download`, and so on; a manifest without a lockfile is not enough), your base branch and which agents are installed, then writes `.harnessbench/config.json` you can edit, copies the starter fixtures into `.harnessbench/fixtures/`, adds `.harnessbench/runs/` and `.harnessbench/.env` to your `.gitignore`, and writes `.harnessbench/.env.example` listing the credential variables your agent and judge could use. Run it with `--dry-run` first to see what it would do, or `--json` for machine-readable output.
 
 The config it writes is small and meant to be edited by hand:
 
@@ -83,7 +83,7 @@ The config it writes is small and meant to be edited by hand:
 
 `setupCommand` runs in each workspace before the agent starts, with the same minimal environment as the test command and a ten-minute cap; `""` means the tree is used as cloned. It is the project's own install step, so keep it frozen (`npm ci`, not `npm install`): anything it changes that is not ignored by git would otherwise count as the agent's diff. `agent.name` chooses the adapter; `command` is the binary it runs (a name on `PATH` or a path), and `model`, `maxTurns` and `args` are passed through to it. A key you did not mean to set is an error naming it, rather than a setting that is silently ignored.
 
-Credentials are never stored in the config. harnessbench forwards the agent's own environment variables from your shell — `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` (a subscription token from `claude setup-token`), or the Bedrock and Vertex settings — and refuses to start when none of them is set. The agent runs in a disposable clone of your repository with its own `HOME` and its own config directory, so your `~/.claude` is neither read nor written, and nothing it does can reach the original repository.
+Credentials are never stored in the config. harnessbench forwards the agent's own environment variables from your shell — `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` (a subscription token from `claude setup-token`), or the Bedrock and Vertex settings — and refuses to start when none of them is set. On a laptop, where the alternative is a key in your shell profile, put them in `.harnessbench/.env` instead: `init` gitignores it and writes a commented `.env.example` beside it listing the variables your agent and judge could use. Every command reads the file into its environment before checking anything, one `KEY=value` per line (comments, blank lines and quoted values as in any env file); a variable already set in your shell wins over the file, so CI is unaffected. The file's values are never logged or printed, and a line the parser cannot read is reported by number only. The agent runs in a disposable clone of your repository with its own `HOME` and its own config directory, so your `~/.claude` is neither read nor written, and nothing it does can reach the original repository.
 
 Then run a fixture:
 
@@ -206,7 +206,7 @@ The `judge` block of the config chooses the model: `provider` is one of `anthrop
 
 Every judging writes `.harnessbench/runs/<timestamp>-<fixture>-judge/`: `judge.json` with the verdicts (judge, title, preference, reason, provider, model, tokens used) and, per judge, `prompt.txt` with exactly what was sent and `response.json` with the raw reply. Judging a pair again replaces the directory. A model that twice fails to answer in the expected shape is an error naming the judge, with its reply kept there.
 
-Requires Node.js 20 or later and a git repository.
+Requires Node.js 20.12 or later (the first release with `util.parseEnv`, which reads `.harnessbench/.env`) and a git repository.
 
 ## Status
 

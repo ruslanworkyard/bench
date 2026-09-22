@@ -4,7 +4,7 @@ import { relative } from "node:path";
 // Type-only, so compare.ts importing the value formatters below is not a cycle.
 import type { JudgeRecord } from "./commands/judge.js";
 import type { Comparison } from "./compare.js";
-import { RUNS_DIR } from "./config.js";
+import { ENV_FILE, RUNS_DIR } from "./config.js";
 import type { HarnessEntry } from "./detect/harness.js";
 import type { Detection } from "./detect/types.js";
 import type { OpStatus } from "./plan.js";
@@ -101,6 +101,8 @@ export function formatSummary(report: Report): string {
   for (const file of report.files) {
     lines.push(`  ${statusLabel(file.status, report.dryRun).padEnd(16)}${file.path}`);
   }
+  lines.push("");
+  lines.push(`credentials: ${ENV_FILE} (gitignored; see .env.example)`);
 
   if (report.warnings.length > 0) {
     lines.push("");

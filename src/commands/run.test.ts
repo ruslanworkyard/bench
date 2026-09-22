@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 
 import { compare } from "../compare.js";
-import { CONFIG_FILE, RUNS_DIR, type AgentConfig, type Config } from "../config.js";
+import { CONFIG_FILE, ENV_FILE, RUNS_DIR, type AgentConfig, type Config } from "../config.js";
 import { readRunRecord, type Environment, type RunRecord } from "../run-record.js";
 
 /**
@@ -600,11 +600,35 @@ test("run with an unknown agent lists the ones harnessbench can drive", () => {
   assert.match(stderr, /known agents: claude-code/);
 });
 
-test("run without credentials says which variables would do", () => {
+test("run without credentials says which variables would do, and where", () => {
   const { status, stderr } = failsWith(withoutCredentials(), repo(), "run", "ttl-cache");
 
   assert.equal(status, 1);
   assert.match(stderr, /no credentials for claude-code: set one of ANTHROPIC_API_KEY/);
+  assert.match(stderr, /in your environment or in \.harnessbench\/\.env/);
+});
+
+test("run takes credentials from .harnessbench/.env when the shell has none, and the agent gets them", () => {
+  const root = repoWithFake("fake-claude.sh");
+  writeFileSync(join(root, ENV_FILE), "# laptop key\nANTHROPIC_API_KEY=from-the-env-file\n", "utf8");
+
+  const result = run(withoutCredentials(), root, "run", "ttl-cache");
+
+  assert.equal(result.status, 0, result.stderr);
+  const dump = readFileSync(ENV["FAKE_CLAUDE_DUMP"] as string, "utf8");
+  assert.match(dump, /^ANTHROPIC_API_KEY=from-the-env-file$/m);
+  assert.equal(git(root, "status", "--porcelain"), "", "the env file is ignored by git");
+});
+
+test("run refuses a malformed .harnessbench/.env without echoing it", () => {
+  const root = repoWithFake("fake-claude.sh");
+  writeFileSync(join(root, ENV_FILE), "sk-pasted-without-a-name\n", "utf8");
+
+  const { status, stderr } = fails(root, "run", "ttl-cache");
+
+  assert.equal(status, 1);
+  assert.match(stderr, /\.harnessbench\/\.env: line 1/);
+  assert.doesNotMatch(stderr, /sk-pasted/);
 });
 
 test("run needs a fixture id", () => {
