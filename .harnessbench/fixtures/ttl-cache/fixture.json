@@ -1,6 +1,0 @@
-{
-  "id": "ttl-cache",
-  "kind": "feature",
-  "description": "In-process TTL cache with size limit, applied to one existing expensive read",
-  "tags": ["performance"]
-}

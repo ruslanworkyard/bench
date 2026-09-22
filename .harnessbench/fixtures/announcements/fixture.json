@@ -1,6 +1,0 @@
-{
-  "id": "announcements",
-  "kind": "feature",
-  "description": "Persist in-app announcements: new table, write and read paths, tests",
-  "tags": ["persistence"]
-}
