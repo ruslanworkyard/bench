@@ -23,7 +23,8 @@ import type { TranscriptEvent } from "../agents/types.js";
 import { CONFIG_FILE, FIXTURES_DIR, JUDGES_DIR, RUNS_DIR, defaults, type Config } from "../config.js";
 import { CliError } from "../errors.js";
 import { modelJudge } from "../judge/judge.js";
-import { packagedJudgesDir } from "../judges.js";
+import { packagedJudgesDir, requireJudge } from "../judges.js";
+import type { Comparison } from "../compare.js";
 import type { ResolvedJudge } from "../preflight.js";
 import { readRunRecord, writeRunRecord, type Environment, type RunRecord } from "../run-record.js";
 import { judge, type JudgeDeps, type JudgeRecord } from "./judge.js";
@@ -210,6 +211,19 @@ function readJudgeRecord(root: string, dirName: string): JudgeRecord {
   return JSON.parse(readFileSync(join(root, RUNS_DIR, dirName, "judge.json"), "utf8")) as JudgeRecord;
 }
 
+/** The hash a verdict of this judge carries, as the catalogue in `root` stands now. */
+function hashOf(root: string, id: string): string {
+  return requireJudge(root, id).hash;
+}
+
+function setJudges(root: string, judges: string[]): void {
+  const path = join(root, CONFIG_FILE);
+  const config = JSON.parse(readFileSync(path, "utf8")) as Config;
+  writeFileSync(path, `${JSON.stringify({ ...config, judges }, null, 2)}\n`, "utf8");
+}
+
+const DIR = "20260919-100000-ttl-cache-judge";
+
 after(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true });
 });
@@ -313,7 +327,7 @@ test("judge runs every configured judge in order, writes judge.json and the per-
     [verdict("A", "A's tests exercise the public surface.\nB's restate the implementation.")],
   );
 
-  const { result, stdout } = await captured(() => judge({ cwd: root, runIds: [candidate, previous], json: false }, deps));
+  const { result, stdout } = await captured(() => judge({ cwd: root, runIds: [candidate, previous], json: false, all: false }, deps));
 
   // Every judge, in config order, each with the config's model; the key never leaves the environment.
   assert.deepEqual(
@@ -341,6 +355,7 @@ test("judge runs every configured judge in order, writes judge.json and the per-
         provider: "anthropic",
         model: "claude-sonnet-4-5",
         usage: { input: 100, output: 20 },
+        rubricHash: hashOf(root, "code-quality"),
       },
       {
         judge: "engineering-practices",
@@ -350,6 +365,7 @@ test("judge runs every configured judge in order, writes judge.json and the per-
         provider: "anthropic",
         model: "claude-sonnet-4-5",
         usage: { input: 100, output: 20 },
+        rubricHash: hashOf(root, "engineering-practices"),
       },
       {
         judge: "test-quality",
@@ -359,9 +375,11 @@ test("judge runs every configured judge in order, writes judge.json and the per-
         provider: "anthropic",
         model: "claude-sonnet-4-5",
         usage: { input: 100, output: 20 },
+        rubricHash: hashOf(root, "test-quality"),
       },
     ],
   });
+  assert.match(stored.verdicts[0]?.rubricHash ?? "", /^[0-9a-f]{64}$/);
 
   // What each judge was sent, and what came back, as files.
   for (const id of ["code-quality", "engineering-practices", "test-quality"]) {
@@ -394,6 +412,12 @@ test("judge runs every configured judge in order, writes judge.json and the per-
   assert.match(stdout, /^Code quality {11}candidate preferred {3}B's diff adds a typed error; A's swallows it\.$/m);
   assert.match(stdout, /^Engineering practices {2}tie {19}Both built and tested once\.$/m);
   assert.match(stdout, /^Test quality {11}previous preferred {4}A's tests exercise the public surface\. B's restate the implementation\.$/m);
+  // Then the comparison table, with the verdicts as rows.
+  const table = stdout.slice(stdout.indexOf("harnessbench compare"));
+  assert.match(table, /^harnessbench compare {2}ttl-cache · code 0123456\n/);
+  assert.match(table, /\n\njudged by anthropic claude-sonnet-4-5\nCode quality\s+candidate preferred\s+improved\s+B's diff adds a typed error; A's\n\s+swallows it\.\n/);
+  assert.match(table, /^Engineering practices\s+tie\s+unchanged\s+Both built and tested once\.$/m);
+  assert.match(table, /^Test quality\s+previous preferred\s+regressed\s+A's tests exercise/m);
 });
 
 test("judge.json overrides the provider and model for its own judge only", async () => {
@@ -404,7 +428,7 @@ test("judge.json overrides the provider and model for its own judge only", async
   const [previous, candidate] = writePair(root, "20260919-100000");
   const deps = mocks([verdict("tie", "x")], [verdict("tie", "y")]);
 
-  const { result } = await captured(() => judge({ cwd: root, runIds: [previous, candidate], json: true }, deps));
+  const { result } = await captured(() => judge({ cwd: root, runIds: [previous, candidate], json: true, all: false }, deps));
 
   assert.deepEqual(
     deps.targets.map((target) => [target.provider, target.model]),
@@ -422,22 +446,181 @@ test("judge.json overrides the provider and model for its own judge only", async
   );
 });
 
-test("--json prints judge.json; re-judging replaces the directory", async () => {
+test("--json prints the comparison with judge rows; --all re-judges and replaces the directory", async () => {
   const root = repo({}, ["code-quality"]);
   const [previous, candidate] = writePair(root, "20260919-100000");
 
-  const first = await captured(() => judge({ cwd: root, runIds: [previous, candidate], json: true }, mocks([verdict("A", "first")])));
-  assert.deepEqual(JSON.parse(first.stdout), first.result);
+  const first = await captured(() => judge({ cwd: root, runIds: [previous, candidate], json: true, all: false }, mocks([verdict("A", "first")])));
+  const printed = JSON.parse(first.stdout) as Comparison;
+  assert.equal(printed.fixture, "ttl-cache");
+  assert.deepEqual(printed.judged, { model: "claude-sonnet-4-5", provider: "anthropic" });
+  assert.deepEqual(
+    printed.rows.filter((row) => row.id.startsWith("judge.")),
+    [{ id: "judge.code-quality", label: "Code quality", previous: "", candidate: "", delta: "previous preferred", classification: "regressed", note: "first" }],
+  );
   assert.equal(first.result.verdicts[0]?.preference, "previous");
   // Something in the directory that a second judging must not keep.
-  writeFileSync(join(root, RUNS_DIR, "20260919-100000-ttl-cache-judge", "stale.txt"), "old", "utf8");
+  writeFileSync(join(root, RUNS_DIR, DIR, "stale.txt"), "old", "utf8");
 
-  const second = await captured(() => judge({ cwd: root, runIds: [previous, candidate], json: true }, mocks([verdict("B", "second")])));
+  const second = await captured(() => judge({ cwd: root, runIds: [previous, candidate], json: true, all: true }, mocks([verdict("B", "second")])));
 
-  assert.deepEqual(judgeDirs(root), ["20260919-100000-ttl-cache-judge"]);
-  assert.equal(readJudgeRecord(root, "20260919-100000-ttl-cache-judge").verdicts[0]?.reason, "second");
+  assert.deepEqual(judgeDirs(root), [DIR]);
+  assert.equal(readJudgeRecord(root, DIR).verdicts[0]?.reason, "second");
   assert.equal(second.result.verdicts[0]?.preference, "candidate");
-  assert.equal(existsSync(join(root, RUNS_DIR, "20260919-100000-ttl-cache-judge", "stale.txt")), false);
+  assert.equal(existsSync(join(root, RUNS_DIR, DIR, "stale.txt")), false);
+  assert.equal(existsSync(join(root, RUNS_DIR, `${DIR}.tmp`)), false);
+  assert.equal(existsSync(join(root, RUNS_DIR, `${DIR}.old`)), false);
+});
+
+// --- incremental judging ---
+
+test("re-judging a fresh judge.json makes no model call and says every judge was kept", async () => {
+  const root = repo();
+  const [previous, candidate] = writePair(root, "20260919-100000");
+  await captured(() => judge({ cwd: root, runIds: [previous, candidate], json: false, all: false }, mocks([verdict("B", "b")], [verdict("tie", "t")], [verdict("A", "a")])));
+  const before = readJudgeRecord(root, DIR);
+  const deps = mocks();
+
+  const { result, stdout } = await captured(() => judge({ cwd: root, runIds: [previous, candidate], json: false, all: false }, deps));
+
+  assert.equal(deps.targets.length, 0, "no judge was called");
+  assert.deepEqual(result, before);
+  assert.deepEqual(readJudgeRecord(root, DIR), before);
+  assert.match(stdout, /^Code quality {11}kept \(rubric unchanged\)$/m);
+  assert.match(stdout, /^Engineering practices {2}kept \(rubric unchanged\)$/m);
+  assert.match(stdout, /^Test quality {11}kept \(rubric unchanged\)$/m);
+  assert.match(stdout, /^Code quality\s+candidate preferred\s+improved\s+b$/m);
+  // The per-judge files travel with the kept verdicts.
+  for (const id of ["code-quality", "engineering-practices", "test-quality"]) {
+    assert.ok(existsSync(join(root, RUNS_DIR, DIR, id, "prompt.txt")), id);
+    assert.ok(existsSync(join(root, RUNS_DIR, DIR, id, "response.json")), id);
+  }
+});
+
+test("editing one rubric re-judges only that judge; the others keep their verdicts and files", async () => {
+  const root = repo();
+  const [previous, candidate] = writePair(root, "20260919-100000");
+  await captured(() => judge({ cwd: root, runIds: [previous, candidate], json: false, all: false }, mocks([verdict("B", "b")], [verdict("tie", "t")], [verdict("A", "a")])));
+  const before = readJudgeRecord(root, DIR);
+  const rubric = join(root, JUDGES_DIR, "engineering-practices", "prompt.md");
+  writeFileSync(rubric, `${readFileSync(rubric, "utf8")}\nAlso: never reward a blind retry.\n`, "utf8");
+  const deps = mocks([verdict("B", "B never retried blind.")]);
+
+  const { result, stdout } = await captured(() => judge({ cwd: root, runIds: [previous, candidate], json: false, all: false }, deps));
+
+  assert.equal(deps.targets.length, 1);
+  assert.match(String(deps.models[0]?.doGenerateCalls[0]?.prompt[0]?.content), /never reward a blind retry/);
+  assert.deepEqual(result.verdicts.map((v) => [v.judge, v.reason]), [
+    ["code-quality", "b"],
+    ["engineering-practices", "B never retried blind."],
+    ["test-quality", "a"],
+  ]);
+  assert.deepEqual(result.verdicts[0], before.verdicts[0]);
+  assert.deepEqual(result.verdicts[2], before.verdicts[2]);
+  assert.equal(result.verdicts[1]?.rubricHash, hashOf(root, "engineering-practices"));
+  assert.notEqual(result.verdicts[1]?.rubricHash, before.verdicts[1]?.rubricHash);
+  assert.match(stdout, /^Code quality {11}kept \(rubric unchanged\)$/m);
+  assert.match(stdout, /^Engineering practices {2}candidate preferred {3}B never retried blind\.$/m);
+  assert.match(readFileSync(join(root, RUNS_DIR, DIR, "engineering-practices", "prompt.txt"), "utf8"), /never reward a blind retry/);
+  assert.ok(existsSync(join(root, RUNS_DIR, DIR, "code-quality", "response.json")));
+});
+
+test("a judge added to the config is the only one judged; a verdict without a rubric hash is re-judged", async () => {
+  const root = repo({}, ["code-quality"]);
+  const [previous, candidate] = writePair(root, "20260919-100000");
+  await captured(() => judge({ cwd: root, runIds: [previous, candidate], json: false, all: false }, mocks([verdict("B", "b")])));
+  setJudges(root, ["code-quality", "test-quality"]);
+  const deps = mocks([verdict("A", "a")]);
+
+  const { result } = await captured(() => judge({ cwd: root, runIds: [previous, candidate], json: false, all: false }, deps));
+
+  assert.equal(deps.targets.length, 1);
+  assert.deepEqual(result.verdicts.map((v) => [v.judge, v.reason]), [
+    ["code-quality", "b"],
+    ["test-quality", "a"],
+  ]);
+
+  // An older file's verdict has no hash: stale, so judged again.
+  const path = join(root, RUNS_DIR, DIR, "judge.json");
+  const stored = JSON.parse(readFileSync(path, "utf8")) as JudgeRecord;
+  delete (stored.verdicts[0] as Partial<typeof stored.verdicts[number]>).rubricHash;
+  writeFileSync(path, JSON.stringify(stored), "utf8");
+  const again = mocks([verdict("tie", "redone")]);
+
+  const second = await captured(() => judge({ cwd: root, runIds: [previous, candidate], json: false, all: false }, again));
+
+  assert.equal(again.targets.length, 1);
+  assert.deepEqual(second.result.verdicts.map((v) => [v.judge, v.reason]), [
+    ["code-quality", "redone"],
+    ["test-quality", "a"],
+  ]);
+});
+
+test("--all judges every configured judge even when every verdict is fresh", async () => {
+  const root = repo();
+  const [previous, candidate] = writePair(root, "20260919-100000");
+  await captured(() => judge({ cwd: root, runIds: [previous, candidate], json: false, all: false }, mocks([verdict("B", "b")], [verdict("tie", "t")], [verdict("A", "a")])));
+  const deps = mocks([verdict("A", "b2")], [verdict("A", "t2")], [verdict("A", "a2")]);
+
+  const { result, stdout } = await captured(() => judge({ cwd: root, runIds: [previous, candidate], json: false, all: true }, deps));
+
+  assert.equal(deps.targets.length, 3);
+  assert.deepEqual(result.verdicts.map((v) => v.reason), ["b2", "t2", "a2"]);
+  assert.doesNotMatch(stdout, /kept/);
+});
+
+test("a verdict for a judge no longer in the config survives, after the configured ones, and the table says so", async () => {
+  const root = repo({}, ["code-quality", "test-quality"]);
+  const [previous, candidate] = writePair(root, "20260919-100000");
+  await captured(() => judge({ cwd: root, runIds: [previous, candidate], json: false, all: false }, mocks([verdict("B", "b")], [verdict("A", "a")])));
+  setJudges(root, ["test-quality"]);
+  const deps = mocks();
+
+  const { result, stdout } = await captured(() => judge({ cwd: root, runIds: [previous, candidate], json: false, all: false }, deps));
+
+  assert.equal(deps.targets.length, 0);
+  assert.deepEqual(result.verdicts.map((v) => [v.judge, v.reason]), [
+    ["test-quality", "a"],
+    ["code-quality", "b"],
+  ]);
+  assert.deepEqual(readJudgeRecord(root, DIR).verdicts.map((v) => v.judge), ["test-quality", "code-quality"]);
+  assert.ok(existsSync(join(root, RUNS_DIR, DIR, "code-quality", "response.json")), "its files ride along");
+  assert.match(stdout, /^Test quality {2}kept \(rubric unchanged\)$/m);
+  assert.doesNotMatch(stdout, /^Code quality {2}kept/m);
+  assert.match(stdout, /^Test quality\s+previous preferred\s+regressed\s+a\n(?:\s*\n)?Code quality\s+candidate preferred\s+improved\s+b — no longer in config\.judges$/m);
+});
+
+test("a failure mid-judge leaves the previous judge.json intact", async () => {
+  const root = repo({}, ["code-quality", "test-quality"]);
+  const [previous, candidate] = writePair(root, "20260919-100000");
+  await captured(() => judge({ cwd: root, runIds: [previous, candidate], json: false, all: false }, mocks([verdict("B", "b")], [verdict("A", "a")])));
+  const before = readJudgeRecord(root, DIR);
+  const deps = mocks([verdict("B", "b2")], [reply("no"), reply("still no")]);
+
+  await assert.rejects(
+    captured(() => judge({ cwd: root, runIds: [previous, candidate], json: false, all: true }, deps)),
+    (error: unknown) => {
+      assert.ok(error instanceof CliError);
+      assert.match(error.message, /judge 'test-quality' did not return a verdict/);
+      assert.match(error.message, new RegExp(`its reply is kept in \\.harnessbench/runs/${DIR}\\.tmp/test-quality/`));
+      return true;
+    },
+  );
+
+  assert.deepEqual(readJudgeRecord(root, DIR), before);
+  assert.deepEqual(judgeDirs(root), [DIR]);
+  const tmp = join(root, RUNS_DIR, `${DIR}.tmp`);
+  assert.equal(existsSync(join(tmp, "judge.json")), false);
+  assert.ok(existsSync(join(tmp, "test-quality", "response.json")));
+  const response = JSON.parse(readFileSync(join(root, RUNS_DIR, DIR, "code-quality", "response.json"), "utf8")) as { text: string };
+  assert.match(response.text, /"reason":"b"/);
+
+  // The leftover .tmp does not get in the way of the next judging, which finds the old file fresh.
+  const retry = mocks();
+  const { result } = await captured(() => judge({ cwd: root, runIds: [previous, candidate], json: false, all: false }, retry));
+  assert.equal(retry.targets.length, 0);
+  assert.deepEqual(result, before);
+  assert.equal(existsSync(tmp), false);
 });
 
 test("a judge that never returns a valid verdict is a CliError naming it, with its reply kept and no judge.json", async () => {
@@ -446,16 +629,17 @@ test("a judge that never returns a valid verdict is a CliError naming it, with i
   const deps = mocks([reply("I prefer A."), reply('{"preference":"A"}')], [verdict("tie", "never reached")]);
 
   await assert.rejects(
-    captured(() => judge({ cwd: root, runIds: [previous, candidate], json: false }, deps)),
+    captured(() => judge({ cwd: root, runIds: [previous, candidate], json: false, all: false }, deps)),
     (error: unknown) => {
       assert.ok(error instanceof CliError);
       assert.match(error.message, /judge 'code-quality' did not return a verdict in the expected shape after two attempts/);
-      assert.match(error.message, /its reply is kept in \.harnessbench\/runs\/20260919-100000-ttl-cache-judge\/code-quality\//);
+      assert.match(error.message, /its reply is kept in \.harnessbench\/runs\/20260919-100000-ttl-cache-judge\.tmp\/code-quality\//);
       return true;
     },
   );
 
-  const dir = join(root, RUNS_DIR, "20260919-100000-ttl-cache-judge");
+  assert.deepEqual(judgeDirs(root), [], "nothing was renamed into place");
+  const dir = join(root, RUNS_DIR, "20260919-100000-ttl-cache-judge.tmp");
   assert.equal(existsSync(join(dir, "judge.json")), false);
   const response = JSON.parse(readFileSync(join(dir, "code-quality", "response.json"), "utf8")) as { text: string; attempts: number };
   assert.equal(response.text, '{"preference":"A"}');
@@ -474,7 +658,7 @@ test("with --fixture, judge picks the latest pair and ignores -judge directories
   write(root, "20260921-100000", "candidate");
   writePair(root, "20260922-100000", {}, "announcements");
 
-  const { result } = await captured(() => judge({ cwd: root, fixture: "ttl-cache", json: false }, mocks([verdict("tie", "same")])));
+  const { result } = await captured(() => judge({ cwd: root, fixture: "ttl-cache", json: false, all: false }, mocks([verdict("tie", "same")])));
 
   assert.deepEqual([result.previous.runId, result.candidate.runId], [previous, candidate]);
   assert.deepEqual(judgeDirs(root), ["20260919-100000-ttl-cache-judge", "20260920-100000-ttl-cache-judge"]);
@@ -544,10 +728,12 @@ test("run --judge judges the pair it just produced, after the comparison", async
   assert.match(prompt, /\+\+\+ b\/agent-was-here\.txt/);
   assert.match(prompt, /## Test result\n\npassed/);
 
-  const compareAt = stdout.indexOf("harnessbench compare");
-  const judgeAt = stdout.indexOf("harnessbench judge");
-  assert.ok(compareAt > 0 && judgeAt > compareAt, "verdicts come after the comparison");
-  assert.match(stdout, /Code quality {2}candidate preferred {3}B's cache has a size limit\./);
+  // The verdicts are rows of the one table; run prints no separate judge block.
+  assert.doesNotMatch(stdout, /harnessbench judge/);
+  const table = stdout.slice(stdout.indexOf("harnessbench compare"));
+  assert.match(table, /\n\njudged by anthropic claude-sonnet-4-5\n/);
+  assert.match(table, /^Code quality\s+candidate preferred\s+improved\s+B's cache has a size limit\.$/m);
+  assert.match(table, /^Test quality\s+tie\s+unchanged\s+Neither side added tests\.$/m);
   assert.doesNotMatch(stderr, /judging skipped/);
 });
 
@@ -566,7 +752,15 @@ test("run --judge on a refusal says judging was skipped and why, and the run is 
   assert.deepEqual(judgeDirs(root), []);
   assert.equal(deps.targets.length, 0);
   assert.match(stderr, /^judging skipped: judge 'code-quality' has no model: set "judge\.model"/m);
-  // --json still prints both records and the comparison, nothing more.
-  const printed = JSON.parse(stdout) as unknown[];
+  // --json still prints both records and the comparison, nothing more; the table says the judges did not run.
+  const printed = JSON.parse(stdout) as [RunRecord, RunRecord, Comparison];
   assert.equal(printed.length, 3);
+  assert.equal(printed[2].judged, null);
+  assert.deepEqual(
+    printed[2].rows.filter((row) => row.id.startsWith("judge.")).map((row) => [row.id, row.note]),
+    [
+      ["judge.code-quality", "not judged; run harnessbench judge --fixture holiday-api-client"],
+      ["judge.test-quality", "not judged; run harnessbench judge --fixture holiday-api-client"],
+    ],
+  );
 });

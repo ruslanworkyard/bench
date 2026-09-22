@@ -1,3 +1,5 @@
+// Type-only: commands/judge.ts imports commands/compare.ts, which imports this file.
+import type { JudgeRecord, VerdictRecord } from "./commands/judge.js";
 import { formatCount, formatDuration, formatUsd } from "./print.js";
 import type { RunRecord } from "./run-record.js";
 import type { Telemetry } from "./telemetry.js";
@@ -33,7 +35,19 @@ export type Comparison = {
   rows: Row[];
   /** Things the reader must know before trusting the rows. */
   warnings: string[];
+  /** Who judged, from the first verdict; null when no verdict exists (or no judges are configured). */
+  judged: { model: string; provider: string } | null;
 };
+
+/** What the judge rows are built from: the pair's judge.json, if any, and the judges the config names. */
+export type JudgeInput = {
+  record: JudgeRecord | null;
+  /** In config order, each with the hash of its rubric as it is now. */
+  configured: Array<{ id: string; title: string; hash: string }>;
+};
+
+/** Judge rows are `judge.<judge-id>`; print.ts sets them apart from the mechanical rows by this. */
+export const JUDGE_ROW_PREFIX = "judge.";
 
 type Side = "previous" | "candidate";
 
@@ -236,7 +250,7 @@ const NUMERIC_ROWS: NumericSpec[] = [
 /** Rows from this one down measure effort, which a run that was cut off did not finish spending. */
 const FIRST_EFFORT_ROW = "turns";
 
-export function compare(previous: RunRecord, candidate: RunRecord): Comparison {
+export function compare(previous: RunRecord, candidate: RunRecord, judgement: JudgeInput | null): Comparison {
   const warnings: string[] = [];
   const incomplete: Side[] = [];
   for (const [side, record] of [
@@ -284,6 +298,12 @@ export function compare(previous: RunRecord, candidate: RunRecord): Comparison {
     }
   }
 
+  let judged: Comparison["judged"] = null;
+  if (judgement !== null) {
+    rows.push(...judgeRows(judgement, candidate.fixture));
+    judged = judgedBy(judgement.record?.verdicts ?? [], warnings);
+  }
+
   return {
     fixture: candidate.fixture,
     headSha: candidate.headSha,
@@ -291,7 +311,70 @@ export function compare(previous: RunRecord, candidate: RunRecord): Comparison {
     candidate: sideSummary(candidate),
     rows,
     warnings,
+    judged,
   };
+}
+
+/**
+ * One row per configured judge, in config order, then one per verdict in the file for a judge
+ * the config no longer names. A verdict is fresh only when its rubric hash matches the rubric
+ * as it is now; a verdict from before hashes existed has none and is stale.
+ */
+function judgeRows(judgement: JudgeInput, fixture: string): Row[] {
+  const verdicts = judgement.record?.verdicts ?? [];
+  const byJudge = new Map(verdicts.map((verdict) => [verdict.judge, verdict]));
+  const rerun = `run harnessbench judge --fixture ${fixture}`;
+  const rows: Row[] = [];
+  for (const configured of judgement.configured) {
+    const verdict = byJudge.get(configured.id);
+    if (verdict === undefined) {
+      rows.push({
+        id: `${JUDGE_ROW_PREFIX}${configured.id}`,
+        label: configured.title,
+        previous: "",
+        candidate: "",
+        delta: "",
+        classification: "n/a",
+        note: `not judged; ${rerun}`,
+      });
+    } else if (verdict.rubricHash === configured.hash) {
+      rows.push(verdictRow(verdict, configured.title, verdict.reason));
+    } else {
+      rows.push(verdictRow(verdict, configured.title, `${verdict.reason} — rubric changed since this verdict; ${rerun}`));
+    }
+  }
+  const configuredIds = new Set(judgement.configured.map((each) => each.id));
+  for (const verdict of verdicts) {
+    if (configuredIds.has(verdict.judge)) continue;
+    rows.push(verdictRow(verdict, verdict.title, `${verdict.reason} — no longer in config.judges`));
+  }
+  return rows;
+}
+
+function verdictRow(verdict: VerdictRecord, label: string, note: string): Row {
+  const classification: Classification =
+    verdict.preference === "candidate" ? "improved" : verdict.preference === "previous" ? "regressed" : "unchanged";
+  return {
+    id: `${JUDGE_ROW_PREFIX}${verdict.judge}`,
+    label,
+    previous: "",
+    candidate: "",
+    delta: verdict.preference === "tie" ? "tie" : `${verdict.preference} preferred`,
+    classification,
+    note: note.replace(/\s*\n\s*/g, " ").trim(),
+  };
+}
+
+/** The first verdict's model; a warning when the file's verdicts do not agree on one. */
+function judgedBy(verdicts: VerdictRecord[], warnings: string[]): Comparison["judged"] {
+  const first = verdicts[0];
+  if (first === undefined) return null;
+  const name = (verdict: VerdictRecord): string => `${verdict.provider} ${verdict.model}`;
+  const others = [...new Set(verdicts.map(name))].filter((each) => each !== name(first));
+  if (others.length > 0) {
+    warnings.push(`judges disagree on the model: ${name(first)} is shown; also ${others.join(", ")}`);
+  }
+  return { model: first.model, provider: first.provider };
 }
 
 function sideSummary(record: RunRecord): Comparison["previous"] {

@@ -17,7 +17,7 @@ import { after, test } from "node:test";
 
 import { harnessSnapshot, type HarnessSnapshot } from "./detect/harness.js";
 import { CliError } from "./errors.js";
-import { createWorkspace, withWorkspace, type Workspace } from "./workspace.js";
+import { abortAll, createWorkspace, liveWorkspaces, withWorkspace, type Workspace } from "./workspace.js";
 
 const hosts: string[] = [];
 const workspaces: Workspace[] = [];
@@ -296,4 +296,34 @@ test("rebaseline leaves one clean commit, so diff sees only what comes after", a
   const diff = await ws.diff();
   assert.match(diff, /^\+\+\+ b\/src\/app\.txt$/m);
   assert.doesNotMatch(diff, /CLAUDE\.md/);
+});
+
+test("abortAll kills every running command's group and removes the live workspaces", async () => {
+  const ws = await workspace(host(), "main");
+  const command = ws.exec("sleep 3139 & wait");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.ok(liveWorkspaces() >= 1);
+
+  const paths = abortAll({ keep: false });
+
+  assert.ok(paths.includes(ws.dir), paths.join(", "));
+  assert.equal(existsSync(ws.dir), false);
+  assert.equal(liveWorkspaces(), 0);
+  const result = await command;
+  assert.equal(result.exitCode, null);
+  assert.equal(running("sleep 3139"), false);
+});
+
+test("abortAll with keep kills the commands but leaves the directories", async () => {
+  const ws = await workspace(host(), "main");
+  const command = ws.exec("sleep 3141 & wait");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  const paths = abortAll({ keep: true });
+
+  assert.ok(paths.includes(ws.dir), paths.join(", "));
+  assert.ok(existsSync(ws.dir));
+  assert.equal(liveWorkspaces(), 0);
+  assert.equal((await command).exitCode, null);
+  assert.equal(running("sleep 3141"), false);
 });

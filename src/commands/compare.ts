@@ -1,12 +1,16 @@
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
-import { compare as compareRecords, type Comparison } from "../compare.js";
-import { RUNS_DIR } from "../config.js";
+import { compare as compareRecords, type Comparison, type JudgeInput } from "../compare.js";
+import { RUNS_DIR, type Config } from "../config.js";
 import { CliError } from "../errors.js";
+import { requireJudge } from "../judges.js";
 import { requireConfig, requireGit, requireRepo } from "../preflight.js";
 import { formatComparison, formatComparisonMarkdown } from "../print.js";
 import { readRunRecord, type RunRecord } from "../run-record.js";
+// Type-only: judge.ts imports this file for the pair loader, so the file name and schema
+// number are repeated below rather than imported.
+import type { JudgeRecord } from "./judge.js";
 
 export type CompareOptions = {
   cwd: string;
@@ -24,9 +28,9 @@ export type CompareOptions = {
 export function compare(options: CompareOptions): Comparison {
   requireGit();
   const root = requireRepo(options.cwd);
-  requireConfig(root);
+  const config = requireConfig(root);
   const [previous, candidate] = loadPair(root, "compare", options);
-  const comparison = compareRecords(previous, candidate);
+  const comparison = compareRecords(previous, candidate, loadJudgement(root, config, previous, candidate));
 
   if (options.json) console.log(JSON.stringify(comparison, null, 2));
   else if (options.markdown) console.log(formatComparisonMarkdown(comparison));
@@ -89,6 +93,63 @@ export function orderPair(records: [RunRecord, RunRecord]): [RunRecord, RunRecor
     );
   }
   return [previous, candidate];
+}
+
+/**
+ * The judge rows' input: the pair's `judge.json`, if one exists, and the configured judges with
+ * their current rubric hashes. Null when the config names no judges: then there are no judge
+ * rows at all. A configured judge missing from the catalogue is the error `judge` gives.
+ */
+export function loadJudgement(root: string, config: Config, previous: RunRecord, candidate: RunRecord): JudgeInput | null {
+  if (config.judges.length === 0) return null;
+  const configured = config.judges.map((id) => {
+    const judge = requireJudge(root, id);
+    return { id, title: judge.meta.title, hash: judge.hash };
+  });
+  const found = findJudgeRecord(join(root, RUNS_DIR), previous, candidate);
+  return { record: found === null ? null : found.record, configured };
+}
+
+/**
+ * The `-judge` directory whose judge.json names this pair. Matched on the two run ids, not
+ * on the directory's stamp: the stamp is a naming convention, the ids are the fact. A
+ * judge.json that is not one of ours (unreadable, another schema) is skipped, not an error.
+ */
+export function findJudgeRecord(
+  runsDir: string,
+  previous: RunRecord,
+  candidate: RunRecord,
+): { dir: string; record: JudgeRecord } | null {
+  const suffix = `-${previous.fixture}-judge`;
+  const entries = existsSync(runsDir) ? readdirSync(runsDir, { withFileTypes: true }) : [];
+  const names = entries
+    .filter((entry) => entry.isDirectory() && entry.name.endsWith(suffix))
+    .map((entry) => entry.name)
+    .sort()
+    .reverse();
+  for (const name of names) {
+    const path = join(runsDir, name, "judge.json");
+    if (!existsSync(path)) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(path, "utf8"));
+    } catch {
+      continue;
+    }
+    const record = parsed as Partial<JudgeRecord> | null;
+    if (
+      typeof record !== "object" ||
+      record === null ||
+      record.schema !== 1 ||
+      record.previous?.runId !== previous.runId ||
+      record.candidate?.runId !== candidate.runId ||
+      !Array.isArray(record.verdicts)
+    ) {
+      continue;
+    }
+    return { dir: join(runsDir, name), record: record as JudgeRecord };
+  }
+  return null;
 }
 
 /** `<stamp>-<fixture>-<environment>`. A `-judge` directory is not a run and never matches. */

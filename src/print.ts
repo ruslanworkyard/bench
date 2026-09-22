@@ -2,11 +2,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { relative } from "node:path";
 
 // Type-only, so compare.ts importing the value formatters below is not a cycle.
-import type { JudgeRecord } from "./commands/judge.js";
-import type { Comparison } from "./compare.js";
+import type { JudgePairResult, JudgeRecord } from "./commands/judge.js";
+import { JUDGE_ROW_PREFIX, type Comparison, type Row } from "./compare.js";
 import { ENV_FILE, RUNS_DIR } from "./config.js";
 import type { HarnessEntry } from "./detect/harness.js";
 import type { Detection } from "./detect/types.js";
+import type { ProgressEvent } from "./commands/run.js";
 import type { OpStatus } from "./plan.js";
 import type { CommandResult, RunRecord } from "./run-record.js";
 import type { Telemetry } from "./telemetry.js";
@@ -257,6 +258,50 @@ export function formatRun(record: RunRecord, agentStderrPath: string): string {
   return lines.join("\n");
 }
 
+/** `0.8s` for anything under ten seconds, then as `formatDuration`. */
+function seconds(ms: number): string {
+  return ms < 10_000 ? `${(ms / 1000).toFixed(1)}s` : formatDuration(ms);
+}
+
+/** How a setup or test command ended: `exit 1`, `killed`, or `timed out`. */
+function ended(result: CommandResult): string {
+  if (result.timedOut) return "timed out";
+  return result.exitCode === null ? "killed" : `exit ${result.exitCode}`;
+}
+
+/**
+ * One line of progress while a run is in flight, for stderr:
+ * `[05:01] previous   agent completed (30 turns)`. Elapsed counts from the `run` invocation,
+ * the same clock for both sides, so the lines read as one timeline.
+ */
+export function formatProgress(elapsedMs: number, environment: string, event: ProgressEvent): string {
+  const total = Math.floor(elapsedMs / 1000);
+  const clock = `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+  return `[${clock}] ${environment.padEnd(11)}${progressText(event)}`;
+}
+
+function progressText(event: ProgressEvent): string {
+  switch (event.kind) {
+    case "started":
+      return "started";
+    case "setup": {
+      const { result } = event;
+      if (result.exitCode === 0 && !result.timedOut) return `setup ok (${result.command}, ${seconds(result.durationMs)})`;
+      return `setup failed (${result.command}, ${ended(result)}, ${seconds(result.durationMs)})`;
+    }
+    case "agent":
+      return `agent ${event.outcome} (${plural(event.turns, "turn")})`;
+    case "tests": {
+      const { result } = event;
+      if (result === null) return "tests not configured";
+      if (result.exitCode === 0 && !result.timedOut) return `tests passed (${seconds(result.durationMs)})`;
+      return `tests failed (${ended(result)}, ${seconds(result.durationMs)})`;
+    }
+    case "recorded":
+      return `recorded ${RUNS_DIR}/${event.runId}`;
+  }
+}
+
 /** Printed above every comparison table. Not a warning: it is true of every comparison. */
 export const NOISE_LINE =
   "one run per side; deltas below the noise threshold are reported as unchanged";
@@ -272,7 +317,45 @@ function models(c: Comparison): string {
   return previous === candidate ? previous : `previous ${previous} → candidate ${candidate}`;
 }
 
-/** The delta table for one fixture: header, the fixed noise line, warnings, then the rows. */
+/** Text tables wrap a judge row's note so the whole line fits in this many columns. */
+const TABLE_WIDTH = 100;
+/**
+ * The note column is never narrower than this: with a `candidate preferred` delta the other
+ * columns already reach column 80, and a note wrapped into what is left would be a sliver.
+ * When the floor applies, the lines run past TABLE_WIDTH.
+ */
+const MIN_NOTE_WIDTH = 40;
+
+function isJudgeRow(row: Row): boolean {
+  return row.id.startsWith(JUDGE_ROW_PREFIX);
+}
+
+/** `judged by anthropic claude-sonnet-4-5`, or `judges: not run` when no verdict exists. */
+function judgedLine(c: Comparison): string {
+  return c.judged === null ? "judges: not run" : `judged by ${c.judged.provider} ${c.judged.model}`;
+}
+
+/** Greedy word wrap; a word longer than `width` gets a line of its own. */
+function wrap(text: string, width: number): string[] {
+  const lines: string[] = [];
+  let current = "";
+  for (const word of text.split(/\s+/).filter((each) => each !== "")) {
+    if (current === "") current = word;
+    else if (current.length + 1 + word.length <= width) current += ` ${word}`;
+    else {
+      lines.push(current);
+      current = word;
+    }
+  }
+  if (current !== "") lines.push(current);
+  return lines;
+}
+
+/**
+ * The delta table for one fixture: header, the fixed noise line, warnings, the mechanical
+ * rows, then (when judges are configured) a line saying who judged and the judge rows in the
+ * same columns, their notes wrapped to the table width.
+ */
 export function formatComparison(c: Comparison): string {
   const lines: string[] = [];
   lines.push(`harnessbench compare  ${c.fixture} · code ${short(c.headSha)}`);
@@ -288,22 +371,31 @@ export function formatComparison(c: Comparison): string {
   for (const warning of c.warnings) lines.push(`warning: ${warning}`);
 
   lines.push("");
-  const cells = c.rows.map((row) => [
+  const cells = (row: Row): string[] => [
     row.label,
     row.previous,
-    `→ ${row.candidate}`,
+    row.candidate === "" ? "" : `→ ${row.candidate}`,
     row.delta,
     row.classification,
-    row.note ?? "",
-  ]);
-  const widths = cells[0]?.map((_, i) => Math.max(...cells.map((row) => row[i]?.length ?? 0))) ?? [];
-  for (const row of cells) {
-    lines.push(
-      row
-        .map((cell, i) => (i === row.length - 1 ? cell : cell.padEnd(widths[i] ?? 0)))
-        .join("  ")
-        .trimEnd(),
-    );
+  ];
+  const all = c.rows.map(cells);
+  const widths = all[0]?.map((_, i) => Math.max(...all.map((row) => row[i]?.length ?? 0))) ?? [];
+  const noteAt = widths.reduce((sum, width) => sum + width + 2, 0);
+  const line = (row: Row, note: string): string =>
+    [...cells(row).map((cell, i) => cell.padEnd(widths[i] ?? 0)), note].join("  ").trimEnd();
+
+  for (const row of c.rows.filter((each) => !isJudgeRow(each))) lines.push(line(row, row.note ?? ""));
+
+  const judgeRows = c.rows.filter(isJudgeRow);
+  if (judgeRows.length > 0) {
+    lines.push("");
+    lines.push(judgedLine(c));
+    const width = Math.max(TABLE_WIDTH - noteAt, MIN_NOTE_WIDTH);
+    for (const row of judgeRows) {
+      const [first = "", ...rest] = wrap(row.note ?? "", width);
+      lines.push(line(row, first));
+      for (const piece of rest) lines.push(`${" ".repeat(noteAt)}${piece}`);
+    }
   }
   return lines.join("\n");
 }
@@ -329,6 +421,11 @@ export function formatComparisonMarkdown(c: Comparison): string {
     lines.push("");
     for (const warning of c.warnings) lines.push(`> **warning:** ${cell(warning)}`);
   }
+  if (c.rows.some(isJudgeRow)) {
+    lines.push("");
+    const sentence = judgedLine(c);
+    lines.push(`${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}.`);
+  }
   lines.push("");
   lines.push("| Criterion | Previous | Candidate | Delta | Result | Note |");
   lines.push("|---|---|---|---|---|---|");
@@ -344,21 +441,27 @@ function preferenceLabel(preference: JudgeRecord["verdicts"][number]["preference
   return preference === "tie" ? "tie" : `${preference} preferred`;
 }
 
-/** The verdicts of one judge run: a header naming the pair, then one line per judge. */
-export function formatVerdicts(record: JudgeRecord): string {
+/**
+ * What `judge` did, printed above the table: a header naming the pair, then one line per
+ * configured judge, the verdict for a judge it ran and `kept (rubric unchanged)` for one it
+ * did not. Verdicts for judges no longer configured are left to the table.
+ */
+export function formatJudging(result: JudgePairResult): string {
+  const { record } = result;
   const lines: string[] = [];
   lines.push(`harnessbench judge  ${record.fixture} · code ${short(record.headSha)}`);
   lines.push("");
   lines.push(`${"Runs".padEnd(11)}${record.previous.runId} → ${record.candidate.runId}`);
   lines.push(`${"Shown as".padEnd(11)}A = ${record.mapping.A}, B = ${record.mapping.B}`);
   lines.push("");
-  if (record.verdicts.length === 0) {
-    lines.push("no verdicts");
-    return lines.join("\n");
-  }
-  const titleWidth = Math.max(...record.verdicts.map((verdict) => verdict.title.length));
-  const labelWidth = Math.max(...record.verdicts.map((verdict) => preferenceLabel(verdict.preference).length));
-  for (const verdict of record.verdicts) {
+  const shown = record.verdicts.filter((verdict) => result.judged.includes(verdict.judge) || result.kept.includes(verdict.judge));
+  const titleWidth = Math.max(0, ...shown.map((verdict) => verdict.title.length));
+  const labelWidth = Math.max(0, ...shown.map((verdict) => preferenceLabel(verdict.preference).length));
+  for (const verdict of shown) {
+    if (result.kept.includes(verdict.judge)) {
+      lines.push(`${verdict.title.padEnd(titleWidth)}  kept (rubric unchanged)`);
+      continue;
+    }
     const reason = verdict.reason.replace(/\s*\n\s*/g, " ").trim();
     lines.push(
       `${verdict.title.padEnd(titleWidth)}  ${preferenceLabel(verdict.preference).padEnd(labelWidth)}   ${reason}`.trimEnd(),

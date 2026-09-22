@@ -2,7 +2,7 @@ import { createWriteStream, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { AgentAdapter, AgentResult } from "../agents/types.js";
-import { compare } from "../compare.js";
+import { compare, type JudgeInput } from "../compare.js";
 import { RUNS_DIR, type AgentConfig } from "../config.js";
 import { dirtyHarnessFiles, harnessFiles, type HarnessSnapshot } from "../detect/harness.js";
 import { CliError } from "../errors.js";
@@ -19,24 +19,20 @@ import {
   requireRepo,
   type LoadedFixture,
 } from "../preflight.js";
-import {
-  formatComparison,
-  formatDirtyHarness,
-  formatRun,
-  formatSameHarness,
-  formatVerdicts,
-} from "../print.js";
+import { formatComparison, formatDirtyHarness, formatProgress, formatRun, formatSameHarness } from "../print.js";
 import {
   ENVIRONMENTS,
   runStamp,
   writeRunRecord,
   type CommandResult,
   type Environment,
+  type RunOutcome,
   type RunRecord,
 } from "../run-record.js";
 import { telemetry } from "../telemetry.js";
 import { withWorkspace, type Workspace } from "../workspace.js";
-import { defaultDeps, judgePair, type JudgeDeps, type JudgeRecord } from "./judge.js";
+import { loadJudgement } from "./compare.js";
+import { defaultDeps, judgePair, type JudgeDeps } from "./judge.js";
 
 export type RunOptions = {
   cwd: string;
@@ -56,6 +52,14 @@ export type RunOptions = {
 const COMMAND_TIMEOUT_MS = 10 * 60_000;
 const SETUP_LOG = "setup.log";
 
+/** What one side reports as it goes; `print.ts` turns each into a line on stderr. */
+export type ProgressEvent =
+  | { kind: "started" }
+  | { kind: "setup"; result: CommandResult }
+  | { kind: "agent"; outcome: RunOutcome; turns: number }
+  | { kind: "tests"; result: CommandResult | null }
+  | { kind: "recorded"; runId: string };
+
 /** Everything one side of a run needs that the other side shares. */
 type Side = {
   root: string;
@@ -72,15 +76,19 @@ type Side = {
   setupCommand: string;
   testCommand: string;
   keep: boolean;
+  progress: (event: ProgressEvent) => void;
 };
 
 /**
- * Runs one fixture twice on the code at HEAD: with the harness at the merge base with the
- * base branch (`previous`), then with the harness at HEAD (`candidate`). Each side gets its
- * own workspace and run directory; both are recorded and summarised, in that order, and
- * the comparison of the two comes last.
+ * Runs one fixture twice on the code at HEAD, both sides at once: with the harness at the
+ * merge base with the base branch (`previous`) and with the harness at HEAD (`candidate`).
+ * Each side gets its own workspace and run directory; while they run, one progress line per
+ * event goes to stderr. Both are recorded and summarised, previous first whichever finished
+ * first, and the comparison of the two comes last.
  */
 export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): Promise<RunRecord[]> {
+  // One clock for both sides' progress lines, started before any preflight.
+  const invokedAt = Date.now();
   requireGit();
   const root = requireRepo(options.cwd);
   const config = requireConfig(root);
@@ -124,49 +132,78 @@ export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): P
     testCommand: config.testCommand,
     keep: options.keep,
   };
-  const records: RunRecord[] = [];
-  const summaries: string[] = [];
-  for (const environment of ENVIRONMENTS) {
-    const runId = `${stamp}-${fixture.fixture.id}-${environment}`;
-    const harness = environment === "previous" ? previous : head;
-    let side: { record: RunRecord; stderrPath: string };
-    try {
-      side = await runSide({ ...shared, runId, environment, harness });
-    } catch (error) {
-      // A side that already ran is not lost with the other side's failure: say where it is.
-      if (error instanceof CliError && records.length > 0) {
-        const kept = records
-          .map((record) => `the ${record.environment} side ran and its record is at ${RUNS_DIR}/${record.runId}`)
-          .join("\n");
-        throw new CliError(`${error.message}\n${kept}`, error.exitCode);
-      }
-      throw error;
-    }
-    records.push(side.record);
-    summaries.push(formatRun(side.record, side.stderrPath));
-  }
+  const settled = await Promise.allSettled(
+    ENVIRONMENTS.map((environment) =>
+      runSide({
+        ...shared,
+        runId: `${stamp}-${fixture.fixture.id}-${environment}`,
+        environment,
+        harness: environment === "previous" ? previous : head,
+        progress: (event) => {
+          process.stderr.write(`${formatProgress(Date.now() - invokedAt, environment, event)}\n`);
+        },
+      }),
+    ),
+  );
+  const sides = settledSides(settled);
+  const records = sides.map((side) => side.record);
+  const summaries = sides.map((side) => formatRun(side.record, side.stderrPath));
 
   const pair = records as [RunRecord, RunRecord];
-  const comparison = compare(...pair);
 
   // A refusal is not a failure of the run: both records exist, so say why and keep the exit code.
-  let verdicts: JudgeRecord | null = null;
+  // The pair is new, so every configured judge runs.
   if (options.judge) {
     try {
-      verdicts = await judgePair(root, config, ...pair, deps);
+      await judgePair(root, config, ...pair, deps, true);
     } catch (error) {
       if (!(error instanceof CliError)) throw error;
-      console.error(`judging skipped: ${error.message.replace(/\s*\n\s*/g, " ")}`);
+      console.error(`judging skipped: ${oneLine(error.message)}`);
     }
   }
-
-  const extra = verdicts === null ? [] : [verdicts];
-  if (options.json) console.log(JSON.stringify([...records, comparison, ...extra], null, 2));
-  else {
-    const table = formatComparison(comparison);
-    console.log([...summaries, table, ...extra.map(formatVerdicts)].join("\n\n"));
+  // The table names the configured judges even without --judge; a config the judges cannot be
+  // loaded for costs the rows, not the run.
+  let judgement: JudgeInput | null = null;
+  try {
+    judgement = loadJudgement(root, config, ...pair);
+  } catch (error) {
+    if (!(error instanceof CliError)) throw error;
+    console.error(`judge rows skipped: ${oneLine(error.message)}`);
   }
+  const comparison = compare(...pair, judgement);
+
+  if (options.json) console.log(JSON.stringify([...records, comparison], null, 2));
+  else console.log([...summaries, formatComparison(comparison)].join("\n\n"));
   return records;
+}
+
+function oneLine(message: string): string {
+  return message.replace(/\s*\n\s*/g, " ");
+}
+
+type SideResult = { record: RunRecord; stderrPath: string };
+
+/**
+ * Both sides' outcomes, in `ENVIRONMENTS` order, or the one error to throw for them. A side's
+ * failure never cancels the other: its record is still worth having, so the error names the
+ * failure(s) and says where any completed record is. The exit code is the worst of the
+ * failures; anything that is not a CliError is a bug and is rethrown as it is.
+ */
+function settledSides(settled: PromiseSettledResult<SideResult>[]): SideResult[] {
+  const failures = settled.flatMap((result) => (result.status === "rejected" ? [result.reason as unknown] : []));
+  const unexpected = failures.find((reason) => !(reason instanceof CliError));
+  if (unexpected !== undefined) throw unexpected;
+  const fulfilled = settled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+  if (failures.length === 0) return fulfilled;
+
+  const errors = failures as CliError[];
+  const kept = fulfilled.map(
+    ({ record }) => `the ${record.environment} side ran and its record is at ${RUNS_DIR}/${record.runId}`,
+  );
+  throw new CliError(
+    [...errors.map((error) => error.message), ...kept].join("\n"),
+    Math.max(...errors.map((error) => error.exitCode)),
+  );
 }
 
 /**
@@ -174,7 +211,8 @@ export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): P
  * run directory. Throws CliError when the setup command fails: a tree that cannot install is
  * a configuration problem, not a result, so no run.json is written and no agent starts.
  */
-async function runSide(side: Side): Promise<{ record: RunRecord; stderrPath: string }> {
+async function runSide(side: Side): Promise<SideResult> {
+  side.progress({ kind: "started" });
   const runDir = join(side.root, RUNS_DIR, side.runId);
   // Before the agent starts, so a crash mid-run still leaves the raw stream behind.
   mkdirSync(runDir, { recursive: true });
@@ -190,6 +228,7 @@ async function runSide(side: Side): Promise<{ record: RunRecord; stderrPath: str
 
       // Before the agent's clock starts; the agent sees only the tree it leaves behind.
       const setup = side.setupCommand === "" ? null : await runLogged(ws, side.setupCommand, join(runDir, SETUP_LOG));
+      if (setup !== null) side.progress({ kind: "setup", result: setup });
       if (setup !== null && setup.exitCode !== 0) throw setupFailed(side, setup, join(RUNS_DIR, side.runId, SETUP_LOG));
 
       const startedAt = new Date();
@@ -200,12 +239,14 @@ async function runSide(side: Side): Promise<{ record: RunRecord; stderrPath: str
         rawOutputPath: join(runDir, "raw.jsonl"),
         stderrPath,
       });
+      side.progress({ kind: "agent", outcome: result.outcome, turns: result.turns });
 
       const diff = await ws.diff();
       writeFileSync(join(runDir, "diff.patch"), diff, "utf8");
 
       const tests =
         side.testCommand === "" ? null : await runLogged(ws, side.testCommand, join(runDir, "test.log"));
+      side.progress({ kind: "tests", result: tests });
 
       const transcript = result.transcript.map((event) => JSON.stringify(event));
       writeFileSync(
@@ -235,6 +276,7 @@ async function runSide(side: Side): Promise<{ record: RunRecord; stderrPath: str
         finalMessage: result.finalMessage,
       };
       writeRunRecord(runDir, finished);
+      side.progress({ kind: "recorded", runId: side.runId });
       return finished;
     },
   );

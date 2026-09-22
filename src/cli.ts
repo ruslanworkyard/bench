@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { writeSync } from "node:fs";
+
 import { compare } from "./commands/compare.js";
 import { init } from "./commands/init.js";
 import { judge } from "./commands/judge.js";
@@ -6,9 +8,10 @@ import { run } from "./commands/run.js";
 import { loadEnvFile } from "./env.js";
 import { CliError } from "./errors.js";
 import { requireGit, requireRepo } from "./preflight.js";
+import { abortAll, liveWorkspaces } from "./workspace.js";
 
 const VALUE_FLAGS = new Set(["base", "test", "setup", "agent", "max-turns", "model", "fixture"]);
-const BOOLEAN_FLAGS = new Set(["dry-run", "json", "keep", "markdown", "judge", "help"]);
+const BOOLEAN_FLAGS = new Set(["dry-run", "json", "keep", "markdown", "judge", "all", "help"]);
 
 const HELP = `harnessbench - Regression tests for your CLAUDE.md.
 
@@ -18,12 +21,15 @@ Usage:
   harnessbench compare [<previous-run-id> <candidate-run-id>] [options]
   harnessbench judge [<previous-run-id> <candidate-run-id>] [options]
 
-run drives the fixture twice on HEAD's code: first with the harness as committed at the
-merge base with the base branch (previous), then with the harness at HEAD (candidate),
-and ends with the comparison of the two. compare prints that table again for two run ids,
+run drives the fixture twice on HEAD's code, both sides at once: with the harness as
+committed at the merge base with the base branch (previous), and with the harness at HEAD
+(candidate); progress goes to stderr as it happens, and the comparison of the two ends
+the output. Ctrl-C stops both agents, removes their workspaces (unless --keep) and exits
+130. compare prints that table again for two run ids,
 or for the latest run of --fixture <id>. judge shows the same pair, blind, to every judge
-in the config's "judges" list and prints one verdict per judge; run --judge does that as
-soon as both sides are in.
+in the config's "judges" list and prints the table with one row per judge; run --judge does
+that as soon as both sides are in. judge is incremental: a verdict whose rubric has not
+changed since is kept, the rest are judged; --all judges every configured judge again.
 
 Options:
   --base <branch>   Base branch to compare against (overrides config/detection)
@@ -34,6 +40,7 @@ Options:
   --model <name>    Model for this run (run only; overrides config)
   --keep            Leave the run's workspace on disk (run only; path printed)
   --judge           Run the configured judges once both sides are in (run only)
+  --all             Judge every configured judge, not only those without a fresh verdict (judge only)
   --fixture <id>    Use the latest run pair of this fixture (compare and judge)
   --markdown        Print the comparison as a GitHub-flavoured markdown table (compare only)
   --dry-run         Report what init would do, without writing anything
@@ -43,7 +50,8 @@ Options:
 Exit codes (run): 0 completed, 2 agent timed out, 3 agent error, 4 agent hit the turn
 limit, 1 anything else; the worse of the two sides wins. A failing test suite is a result,
 not an error: it does not change the exit code. A failing setup command is exit 1 with no
-run.json for that side. compare exits 0 after printing: it reports,
+run.json for that side; an interrupted run is exit 130 with no run.json for either side.
+compare exits 0 after printing: it reports,
 it does not gate. judge exits 0 with verdicts, 1 when it refuses (a side that did not
 complete, no model or key, context over the size limit); with run --judge a refusal is
 one line on stderr and the run's own exit code.`;
@@ -106,6 +114,30 @@ function loadCredentials(): void {
 /** What the shell learns from a run: the agent's outcome, never the test suite's. */
 const RUN_EXIT_CODES = { completed: 0, timeout: 2, error: 3, max_turns: 4 } as const;
 
+/** The conventional exit code for a process ended by SIGINT (128 + 2). */
+const INTERRUPTED_EXIT_CODE = 130;
+
+/**
+ * Ctrl-C reaches this process, not the agents: they run detached, in their own process
+ * groups, so left alone they would keep running and spending. On the first signal, kill
+ * them all, clean up (or keep, with --keep) and exit; a second signal during that is ignored.
+ * Written with writeSync: on macOS a piped stderr is asynchronous and process.exit would
+ * cut the message off.
+ */
+function stopRunsOnSignal(keep: boolean): void {
+  let stopping = false;
+  const onSignal = (): void => {
+    if (stopping) return;
+    stopping = true;
+    writeSync(process.stderr.fd, `harnessbench: interrupted, stopping ${liveWorkspaces()} run(s)\n`);
+    const paths = abortAll({ keep });
+    if (keep) for (const path of paths) writeSync(process.stderr.fd, `workspace kept at ${path}\n`);
+    process.exit(INTERRUPTED_EXIT_CODE);
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+}
+
 async function main(argv: string[]): Promise<number> {
   const { positional, flags } = parse(argv);
   const command = positional[0];
@@ -131,6 +163,7 @@ async function main(argv: string[]): Promise<number> {
       throw new CliError(`run needs a fixture id\n\n${HELP}`, 2);
     }
     loadCredentials();
+    stopRunsOnSignal(flags["keep"] === true);
     const records = await run({
       cwd: process.cwd(),
       fixtureId,
@@ -158,6 +191,7 @@ async function main(argv: string[]): Promise<number> {
       runIds: ids.length === 2 ? (ids as [string, string]) : undefined,
       fixture: value(flags, "fixture"),
       json: flags["json"] === true,
+      all: flags["all"] === true,
     });
     return 0;
   }
@@ -185,12 +219,17 @@ async function main(argv: string[]): Promise<number> {
   throw new CliError(`unknown command "${command}"\n\n${HELP}`, 2);
 }
 
+// The exit code is set, not forced: on macOS a piped stdout is written asynchronously, and
+// process.exit() would cut a long --json document off at the first 8 KB.
 main(process.argv.slice(2)).then(
-  (code) => process.exit(code),
+  (code) => {
+    process.exitCode = code;
+  },
   (error: unknown) => {
     if (error instanceof CliError) {
       console.error(`harnessbench: ${error.message}`);
-      process.exit(error.exitCode);
+      process.exitCode = error.exitCode;
+      return;
     }
     throw error;
   },

@@ -245,6 +245,7 @@ function judge(overrides: Partial<LoadedJudge["meta"]> = {}): LoadedJudge {
   return {
     dir: "",
     rubric: "",
+    hash: "",
     meta: {
       id: "code-quality",
       title: "Code quality",

@@ -53,7 +53,7 @@ test("the system prompt is the rubric followed by the fixed instruction block, a
   assert.match(INSTRUCTIONS, /otherwise answer tie\./);
   assert.match(
     INSTRUCTIONS,
-    /decided it, in one or two sentences\. Answer with a JSON object with exactly two keys: "preference", whose value is "A", "B" or "tie", and "reason"\.$/,
+    /decided it, in at most two sentences\. Answer with a JSON object with exactly two keys: "preference", whose value is "A", "B" or "tie", and "reason"\.$/,
   );
   const prompt = model.doGenerateCalls[0]?.prompt ?? [];
   assert.equal(prompt[0]?.role, "system");

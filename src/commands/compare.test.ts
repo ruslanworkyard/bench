@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 
 import type { Comparison } from "../compare.js";
-import { CONFIG_FILE, RUNS_DIR, defaults } from "../config.js";
+import { CONFIG_FILE, JUDGES_DIR, RUNS_DIR, defaults } from "../config.js";
+import { listJudges, packagedJudgesDir } from "../judges.js";
+import * as print from "../print.js";
 import { NOISE_LINE } from "../print.js";
 import { writeRunRecord, type Environment, type RunRecord } from "../run-record.js";
+import type { JudgeRecord, VerdictRecord } from "./judge.js";
 
 /** Only fabricated run directories here: compare never runs an agent, and neither do its tests. */
 
@@ -18,14 +21,48 @@ const ENV = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM:
 
 const roots: string[] = [];
 
-/** An initialised repository with an empty runs directory. */
-function repo(): string {
+/** An initialised repository with an empty runs directory: the default config and the packaged judges. */
+function repo(judges = defaults().judges): string {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "harnessbench-compare-")));
   roots.push(root);
   execFileSync("git", ["init", "--quiet", "-b", "main"], { cwd: root, env: ENV });
   mkdirSync(join(root, RUNS_DIR), { recursive: true });
-  writeFileSync(join(root, CONFIG_FILE), `${JSON.stringify(defaults(), null, 2)}\n`, "utf8");
+  writeFileSync(join(root, CONFIG_FILE), `${JSON.stringify({ ...defaults(), judges }, null, 2)}\n`, "utf8");
+  cpSync(packagedJudgesDir(), join(root, JUDGES_DIR), { recursive: true });
   return root;
+}
+
+/** A verdict as `judge` would have written it for the catalogue in `root`; a judge not in the catalogue gets `patch`'s title and hash. */
+function verdict(root: string, id: string, patch: Partial<VerdictRecord> = {}): VerdictRecord {
+  const judge = listJudges(root).find((each) => each.meta.id === id);
+  return {
+    judge: id,
+    title: judge?.meta.title ?? id,
+    preference: "candidate",
+    reason: `${id} reason`,
+    provider: "anthropic",
+    model: "claude-sonnet-4-5",
+    usage: { input: 100, output: 20 },
+    rubricHash: judge?.hash ?? "no-such-judge",
+    ...patch,
+  };
+}
+
+/** Writes a `-judge` directory named by `stamp` whose judge.json names the given pair. */
+function writeJudge(root: string, stamp: string, previous: string, candidate: string, verdicts: VerdictRecord[], fixture = "ttl-cache"): string {
+  const name = `${stamp}-${fixture}-judge`;
+  const record: JudgeRecord = {
+    schema: 1,
+    fixture,
+    headSha: HEAD,
+    previous: { runId: previous },
+    candidate: { runId: candidate },
+    mapping: { A: "previous", B: "candidate" },
+    verdicts,
+  };
+  mkdirSync(join(root, RUNS_DIR, name), { recursive: true });
+  writeFileSync(join(root, RUNS_DIR, name, "judge.json"), JSON.stringify(record), "utf8");
+  return name;
 }
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
@@ -247,4 +284,82 @@ test("compare passes the record's warnings through with a warning: prefix", () =
 
   assert.match(stdout, /^warning: previous did not complete \(timeout\)/m);
   assert.match(stdout, /Turns\s+30\s+→ 20\s+n\/a\s+previous did not complete/);
+});
+
+// --- judge rows ---
+
+test("compare finds the pair's judge.json by run ids, not by the directory stamp", () => {
+  const root = repo(["code-quality"]);
+  const [previous, candidate] = writePair(root, "20260919-031455");
+  const [otherPrevious, otherCandidate] = writePair(root, "20260920-031455");
+  // The directory stamped like our pair holds the other pair's verdicts, and vice versa.
+  writeJudge(root, "20260919-031455", otherPrevious, otherCandidate, [verdict(root, "code-quality", { reason: "the other pair" })]);
+  writeJudge(root, "20260920-031455", previous, candidate, [verdict(root, "code-quality", { reason: "ours" })]);
+  // Garbage in a judge.json is skipped, not an error.
+  mkdirSync(join(root, RUNS_DIR, "20260921-000000-ttl-cache-judge"));
+  writeFileSync(join(root, RUNS_DIR, "20260921-000000-ttl-cache-judge", "judge.json"), "{}", "utf8");
+
+  const parsed = JSON.parse(ok(root, "--json", previous, candidate).stdout) as Comparison;
+
+  const rows = parsed.rows.filter((row) => row.id.startsWith("judge."));
+  assert.deepEqual(rows, [
+    { id: "judge.code-quality", label: "Code quality", previous: "", candidate: "", delta: "candidate preferred", classification: "improved", note: "ours" },
+  ]);
+  assert.deepEqual(parsed.judged, { model: "claude-sonnet-4-5", provider: "anthropic" });
+});
+
+test("the table carries the judge rows: fresh, stale, not judged and no longer configured", () => {
+  const root = repo(["code-quality", "engineering-practices", "test-quality"]);
+  const [previous, candidate] = writePair(root, "20260919-031455");
+  writeJudge(root, "20260919-031455", previous, candidate, [
+    verdict(root, "vibes", { title: "Vibes", preference: "previous", reason: "A felt better." }),
+    verdict(root, "test-quality", { preference: "tie", reason: "Both cover expiry.", rubricHash: "from-an-older-rubric" }),
+    verdict(root, "code-quality", { reason: "B keeps the error type." }),
+  ]);
+
+  const { stdout } = ok(root, previous, candidate);
+
+  const table = stdout.slice(stdout.indexOf("\n\njudged by") + 2).trimEnd().split("\n");
+  assert.equal(table[0], "judged by anthropic claude-sonnet-4-5");
+  const rows = table.slice(1);
+  // Config order, then the unconfigured verdict; every note either fits or wraps at the note column.
+  const noteAt = (rows[0] as string).indexOf("B keeps");
+  assert.match(rows[0] as string, /^Code quality\s+candidate preferred\s+improved\s+B keeps the error type\.$/);
+  assert.match(rows[1] as string, /^Engineering practices\s+n\/a\s+not judged; run harnessbench judge$/);
+  assert.equal(rows[2], `${" ".repeat(noteAt)}--fixture ttl-cache`);
+  assert.match(rows[3] as string, /^Test quality\s+tie\s+unchanged\s+Both cover expiry\. — rubric changed$/);
+  assert.equal(rows[4], `${" ".repeat(noteAt)}since this verdict; run harnessbench`);
+  assert.equal(rows[5], `${" ".repeat(noteAt)}judge --fixture ttl-cache`);
+  assert.match(rows[6] as string, /^Vibes\s+previous preferred\s+regressed\s+A felt better\. — no longer in$/);
+  assert.equal(rows[7], `${" ".repeat(noteAt)}config.judges`);
+  assert.equal(rows.length, 8);
+  for (const line of rows) assert.ok((line as string).length <= noteAt + 40, line);
+
+  const markdown = ok(root, "--markdown", previous, candidate).stdout;
+  assert.match(markdown, /^Judged by anthropic claude-sonnet-4-5\.$/m);
+  assert.match(markdown, /^\| Test quality \|  \|  \| tie \| unchanged \| Both cover expiry\. — rubric changed since this verdict; run harnessbench judge --fixture ttl-cache \|$/m);
+  assert.match(markdown, /^\| Vibes \|  \|  \| previous preferred \| regressed \| A felt better\. — no longer in config\.judges \|$/m);
+});
+
+test("with judges configured and no judge.json the rows say not judged; with none configured there are no rows", () => {
+  const root = repo();
+  const [previous, candidate] = writePair(root, "20260919-031455");
+  const { stdout } = ok(root, previous, candidate);
+  assert.match(stdout, /\n\njudges: not run\nCode quality\s+n\/a\s+not judged; run harnessbench judge\n\s+--fixture ttl-cache\nEngineering practices/);
+
+  const none = repo([]);
+  const pair = writePair(none, "20260919-031455");
+  const bare = ok(none, ...pair).stdout;
+  assert.doesNotMatch(bare, /judge/);
+  assert.equal((JSON.parse(ok(none, "--json", ...pair).stdout) as Comparison).judged, null);
+});
+
+test("compare refuses a configured judge missing from the catalogue, as judge does", () => {
+  const root = repo(["code-quality", "vibes"]);
+  const [previous, candidate] = writePair(root, "20260919-031455");
+  assert.match(fails(root, previous, candidate).stderr, /unknown judge 'vibes'[\s\S]*available judges:/);
+});
+
+test("formatVerdicts no longer exists: the table is the only rendering of a verdict", () => {
+  assert.equal("formatVerdicts" in print, false);
 });

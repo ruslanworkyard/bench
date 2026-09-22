@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,6 +17,8 @@ import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 
 import { compare } from "../compare.js";
+import { requireConfig } from "../preflight.js";
+import { loadJudgement } from "./compare.js";
 import { CONFIG_FILE, ENV_FILE, RUNS_DIR, type AgentConfig, type Config } from "../config.js";
 import { readRunRecord, type Environment, type RunRecord } from "../run-record.js";
 
@@ -307,10 +311,16 @@ test("on a branch, the previous side runs the merge-base harness on the branch's
   assert.deepEqual(candidate.harness.files, [".claude/rules.md", "CLAUDE.md"]);
   assert.notEqual(previous.harness.hash, candidate.harness.hash);
 
-  // What each side's agent actually saw, in the workspaces --keep left behind.
+  // What each side's agent actually saw, in the workspaces --keep left behind. The sides run
+  // at once, so the lines come in whichever order they finished: pick each by its run id.
   const kept = [...stderr.matchAll(/^workspace kept at (.+)$/gm)].map((match) => match[1] as string);
   assert.equal(kept.length, 2, stderr);
-  const [previousTree, candidateTree] = kept.map((dir) => join(dir, "tree")) as [string, string];
+  const tree = (environment: Environment): string => {
+    const dir = kept.find((path) => path.endsWith(`-${environment}`));
+    assert.ok(dir !== undefined, `no kept workspace for ${environment} in: ${kept.join(", ")}`);
+    return join(dir, "tree");
+  };
+  const [previousTree, candidateTree] = [tree("previous"), tree("candidate")];
   assert.equal(readFileSync(join(previousTree, "CLAUDE.md"), "utf8"), "# House rules\n");
   assert.equal(existsSync(join(previousTree, ".claude")), false);
   assert.equal(readFileSync(join(previousTree, "code.txt"), "utf8"), "changed on the branch\n");
@@ -389,21 +399,21 @@ test("a failing setup command fails the run before any agent starts, and leaves 
 
   const { status, stderr } = fails(root, "run", "ttl-cache");
 
+  // Both sides run at once and both fail the same way: one error carries both messages.
   assert.equal(status, 1);
-  assert.match(stderr, /previous: setup command `echo cannot install >&2; exit 7` exited with code 7/);
+  for (const side of ["previous", "candidate"]) {
+    assert.match(stderr, new RegExp(`${side}: setup command \`echo cannot install >&2; exit 7\` exited with code 7`));
+    assert.match(stderr, new RegExp(`${RUNS_DIR}/\\d{8}-\\d{6}-ttl-cache-${side}/setup\\.log`));
+  }
   assert.match(stderr, /the agent was not started/);
-  assert.match(stderr, new RegExp(`${RUNS_DIR}/\\d{8}-\\d{6}-ttl-cache-previous/setup\\.log`));
-  assert.doesNotMatch(stderr, /candidate: setup command|candidate side ran/);
+  assert.doesNotMatch(stderr, /side ran and its record/);
 
-  // Only the previous side got a directory, holding the log and nothing of a run.
-  const runs = join(root, RUNS_DIR);
-  const entries = execFileSync("ls", [runs], { encoding: "utf8" }).trim().split("\n");
-  assert.equal(entries.length, 1, entries.join(", "));
-  const dir = join(runs, entries[0] as string);
-  assert.match(dir, /-previous$/);
-  assert.equal(readFileSync(join(dir, "setup.log"), "utf8"), "cannot install\n");
-  assert.equal(existsSync(join(dir, "run.json")), false);
-  assert.equal(existsSync(join(dir, "raw.jsonl")), false);
+  // Each side got a directory holding the log and nothing of a run.
+  for (const dir of Object.values(runDirs(root))) {
+    assert.equal(readFileSync(join(dir, "setup.log"), "utf8"), "cannot install\n");
+    assert.equal(existsSync(join(dir, "run.json")), false);
+    assert.equal(existsSync(join(dir, "raw.jsonl")), false);
+  }
   // The fake agent never ran: its dump is whatever an earlier test left, or nothing.
   const dumpAfter = existsSync(ENV["FAKE_CLAUDE_DUMP"] as string) && readFileSync(ENV["FAKE_CLAUDE_DUMP"] as string, "utf8");
   assert.equal(dumpAfter, dumpBefore);
@@ -508,10 +518,12 @@ test("--keep leaves the workspace behind and says where; without it the workspac
   const workspaces = [...stderr.matchAll(/^workspace kept at (.+)$/gm)].map((match) => match[1] as string);
   assert.equal(workspaces.length, 2, stderr);
   const dirs = runDirs(kept);
-  for (const [i, environment] of (["previous", "candidate"] as const).entries()) {
-    const workspace = workspaces[i] as string;
+  for (const environment of ["previous", "candidate"] as const) {
+    // Whichever side finished first printed first; each path ends in its own run id.
+    const runId = readRunRecord(dirs[environment]).runId;
+    const workspace = workspaces.find((path) => path.endsWith(runId));
+    assert.ok(workspace !== undefined, `no kept workspace for ${runId} in: ${workspaces.join(", ")}`);
     assert.ok(existsSync(join(workspace, "tree", "agent-was-here.txt")), workspace);
-    assert.ok(workspace.endsWith(readRunRecord(dirs[environment]).runId), workspace);
     // Run ids have one-second resolution: a kept workspace would collide with the next run.
     rmSync(workspace, { recursive: true, force: true });
   }
@@ -532,7 +544,8 @@ test("--json prints both run.json records, previous first, then the comparison",
   const dirs = runDirs(root);
   const previous = readRunRecord(dirs.previous);
   const candidate = readRunRecord(dirs.candidate);
-  assert.deepEqual(JSON.parse(stdout), [previous, candidate, compare(previous, candidate)]);
+  const judgement = loadJudgement(root, requireConfig(root), previous, candidate);
+  assert.deepEqual(JSON.parse(stdout), [previous, candidate, compare(previous, candidate, judgement)]);
   assert.doesNotMatch(stdout, /Tool calls\s+2/);
 });
 
@@ -636,4 +649,151 @@ test("run needs a fixture id", () => {
 
   assert.equal(status, 2);
   assert.match(stderr, /run needs a fixture id/);
+});
+
+/** The environment for a fake that leaves marks (timestamps, pids) in a fresh directory. */
+function withMarks(): { env: NodeJS.ProcessEnv; marks: string } {
+  const marks = tempDir("harnessbench-marks-");
+  return { env: { ...ENV, FAKE_CLAUDE_MARKS: marks }, marks };
+}
+
+const MARKING_AGENT = { env: ["FAKE_CLAUDE_STREAM", "FAKE_CLAUDE_MARKS"] };
+
+test("both sides run at once, and the records still come back previous first", () => {
+  const root = repoWithFake("concurrent-claude.sh", { agent: MARKING_AGENT });
+  const { env, marks } = withMarks();
+
+  const began = Date.now();
+  const result = run(env, root, "run", "ttl-cache", "--json");
+  const took = Date.now() - began;
+
+  assert.equal(result.status, 0, result.stderr);
+  // Each agent sleeps 1.5 s; one after the other would take 3 s. Both start before either ends.
+  assert.ok(took < 2500, `run took ${took}ms`);
+  const mtime = (name: string): number => statSync(join(marks, name)).mtimeMs;
+  const started = Math.max(mtime("previous.started"), mtime("candidate.started"));
+  const finished = Math.min(mtime("previous.finished"), mtime("candidate.finished"));
+  assert.ok(started < finished, `an agent started at ${started} after another finished at ${finished}`);
+
+  const records = JSON.parse(result.stdout) as RunRecord[];
+  assert.deepEqual(records.slice(0, 2).map((record) => record.environment), ["previous", "candidate"]);
+  const dirs = runDirs(root);
+  assert.equal(readRunRecord(dirs.previous).outcome, "completed");
+  assert.equal(readRunRecord(dirs.candidate).outcome, "completed");
+});
+
+test("progress goes to stderr, one line per event per side, while stdout waits for the end", () => {
+  const root = repoWithFake("fake-claude.sh", { setupCommand: "echo deps" });
+
+  const { stdout, stderr } = ok(root, "run", "ttl-cache");
+
+  for (const side of ["previous", "candidate"]) {
+    const line = (text: string): RegExp => new RegExp(`^\\[\\d\\d:\\d\\d\\] ${side}\\s+${text}$`, "m");
+    assert.match(stderr, line("started"));
+    assert.match(stderr, line("setup ok \\(echo deps, \\d+\\.\\ds\\)"));
+    assert.match(stderr, line("agent completed \\(7 turns\\)"));
+    assert.match(stderr, line("tests passed \\(\\d+\\.\\ds\\)"));
+    assert.match(stderr, line(`recorded ${RUNS_DIR}/\\d{8}-\\d{6}-ttl-cache-${side}`));
+  }
+  assert.doesNotMatch(stdout, /^\[\d\d:\d\d\]/m);
+  // Both sides start before either records: the lines are one timeline, not two summaries.
+  const lines = stderr.split("\n");
+  const index = (pattern: RegExp): number => lines.findIndex((line) => pattern.test(line));
+  assert.ok(index(/candidate\s+started/) < index(/previous\s+recorded/), stderr);
+  assert.ok(index(/previous\s+started/) < index(/candidate\s+recorded/), stderr);
+});
+
+test("with --json, progress still goes to stderr and stdout stays pure JSON", () => {
+  const root = repoWithFake("fake-claude.sh");
+
+  const { stdout, stderr } = ok(root, "run", "ttl-cache", "--json");
+
+  assert.match(stderr, /^\[\d\d:\d\d\] previous\s+started$/m);
+  assert.match(stderr, /^\[\d\d:\d\d\] candidate\s+recorded /m);
+  assert.doesNotMatch(stdout, /^\[\d\d:\d\d\]/m);
+  assert.equal((JSON.parse(stdout) as unknown[]).length, 3);
+});
+
+/** Polls `probe` until it returns a value, or fails after `timeoutMs`. */
+async function until<T>(what: string, probe: () => T | null, timeoutMs: number): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = probe();
+    if (value !== null) return value;
+    assert.ok(Date.now() < deadline, `timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Starts a run whose agents write their pids and then hang, waits until both are running, and
+ * sends the CLI the signal a terminal's Ctrl-C would. Returns what the CLI did, the agents'
+ * pids, and the workspace directories the run ids name.
+ */
+async function interrupt(
+  ...args: string[]
+): Promise<{ status: number | null; stderr: string; pids: number[]; workspaces: string[] }> {
+  const root = repoWithFake("interruptible-claude.sh", { agent: { env: ["FAKE_CLAUDE_MARKS"] } });
+  const { env, marks } = withMarks();
+
+  const child = spawn(process.execPath, [CLI, "run", "ttl-cache", ...args], {
+    cwd: root,
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stdout.resume();
+  child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
+  const closed = new Promise<number | null>((resolve) => child.on("close", resolve));
+
+  const agents = await until(
+    "both agents to start",
+    () => {
+      const files = readdirSync(marks).filter((name) => name.endsWith(".pid"));
+      const pids = files.map((name) => Number(readFileSync(join(marks, name), "utf8").trim()));
+      return files.length === 2 && pids.every(Number.isInteger) ? { files, pids } : null;
+    },
+    20_000,
+  );
+  for (const pid of agents.pids) assert.ok(alive(pid), `agent ${pid} is not running`);
+
+  child.kill("SIGINT");
+  const status = await closed;
+  // A killed process is a zombie until its parent reaps it; the CLI's exit hands them to init.
+  await until("the agents to be gone", () => (agents.pids.some(alive) ? null : true), 5_000);
+
+  const workspaces = agents.files.map((name) => join(realpathSync(tmpdir()), "harnessbench", name.replace(/\.pid$/, "")));
+  return { status, stderr, pids: agents.pids, workspaces };
+}
+
+test("Ctrl-C kills both agents, removes both workspaces, and exits 130", async () => {
+  const { status, stderr, pids, workspaces } = await interrupt();
+
+  assert.equal(status, 130);
+  assert.match(stderr, /^harnessbench: interrupted, stopping 2 run\(s\)$/m);
+  assert.doesNotMatch(stderr, /workspace kept/);
+  for (const pid of pids) assert.equal(alive(pid), false, `agent ${pid} survived`);
+  for (const dir of workspaces) assert.equal(existsSync(dir), false, `${dir} was left behind`);
+});
+
+test("Ctrl-C with --keep kills both agents but leaves the workspaces, and lists them", async () => {
+  const { status, stderr, pids, workspaces } = await interrupt("--keep");
+
+  assert.equal(status, 130);
+  assert.match(stderr, /^harnessbench: interrupted, stopping 2 run\(s\)$/m);
+  for (const pid of pids) assert.equal(alive(pid), false, `agent ${pid} survived`);
+  for (const dir of workspaces) {
+    assert.ok(existsSync(dir), `${dir} is gone`);
+    assert.ok(stderr.includes(`workspace kept at ${dir}`), stderr);
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

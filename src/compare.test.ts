@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { compare, type Classification, type Row } from "./compare.js";
+import type { JudgeRecord, VerdictRecord } from "./commands/judge.js";
+import { compare, type Classification, type JudgeInput, type Row } from "./compare.js";
 import type { RunRecord } from "./run-record.js";
 import type { Telemetry } from "./telemetry.js";
 
@@ -74,7 +75,7 @@ function previous(patch: Partial<RunRecord> = {}): RunRecord {
 
 /** compare(), with `before` and `after` applied on top of a clean pair. */
 function pair(before: Partial<RunRecord>, after: Partial<RunRecord> = {}) {
-  return compare(previous(before), record(after));
+  return compare(previous(before), record(after), null);
 }
 
 function row(rows: Row[], id: string): Row {
@@ -226,7 +227,7 @@ test("sub-agents: never better or worse, the delta shown, the models in the note
 
 test("telemetry rows are n/a on a record from before telemetry was recorded", () => {
   const { telemetry: _dropped, ...earlier } = previous();
-  const c = compare(earlier as RunRecord, record());
+  const c = compare(earlier as RunRecord, record(), null);
 
   for (const id of ["toolCalls.main", "toolCalls.sub", "subAgents", "readsBeforeFirstEdit", "duplicateReads", "tokens.mainCacheRead", "phases.exploringMs"]) {
     const r = row(c.rows, id);
@@ -328,4 +329,148 @@ test("warns when the records come from different run invocations", () => {
   assert.deepEqual(c.warnings, [
     "the runs come from different `run` invocations (20260918-120000-ttl-cache-previous, 20260919-031455-ttl-cache-candidate)",
   ]);
+});
+
+// --- judge rows ---
+
+function verdict(patch: Partial<VerdictRecord> & { judge: string }): VerdictRecord {
+  return {
+    title: patch.judge,
+    preference: "candidate",
+    reason: "B's diff adds a typed error.",
+    provider: "anthropic",
+    model: "claude-sonnet-4-5",
+    usage: { input: 100, output: 20 },
+    rubricHash: `${patch.judge}-hash`,
+    ...patch,
+  };
+}
+
+function judgeRecord(verdicts: VerdictRecord[]): JudgeRecord {
+  return {
+    schema: 1,
+    fixture: "ttl-cache",
+    headSha: "0123456789abcdef0123456789abcdef01234567",
+    previous: { runId: "20260919-031455-ttl-cache-previous" },
+    candidate: { runId: "20260919-031455-ttl-cache-candidate" },
+    mapping: { A: "previous", B: "candidate" },
+    verdicts,
+  };
+}
+
+/** The configured judges, each with the hash the verdicts above carry unless overridden. */
+function configured(...ids: string[]): JudgeInput["configured"] {
+  return ids.map((id) => ({ id, title: `Title of ${id}`, hash: `${id}-hash` }));
+}
+
+function judged(input: JudgeInput | null) {
+  return compare(previous(), record(), input);
+}
+
+function judgeRows(rows: Row[]): Row[] {
+  return rows.filter((r) => r.id.startsWith("judge."));
+}
+
+test("a fresh verdict is a row with the verdict as delta and the reason as note", () => {
+  const c = judged({
+    record: judgeRecord([
+      verdict({ judge: "code-quality", preference: "candidate", reason: "B keeps the error type." }),
+      verdict({ judge: "practices", preference: "previous", reason: "A ran the suite once.\nB never did." }),
+      verdict({ judge: "tests", preference: "tie", reason: "Both cover expiry." }),
+    ]),
+    configured: configured("code-quality", "practices", "tests"),
+  });
+
+  assert.deepEqual(judgeRows(c.rows), [
+    { id: "judge.code-quality", label: "Title of code-quality", previous: "", candidate: "", delta: "candidate preferred", classification: "improved", note: "B keeps the error type." },
+    { id: "judge.practices", label: "Title of practices", previous: "", candidate: "", delta: "previous preferred", classification: "regressed", note: "A ran the suite once. B never did." },
+    { id: "judge.tests", label: "Title of tests", previous: "", candidate: "", delta: "tie", classification: "unchanged", note: "Both cover expiry." },
+  ]);
+  // Judge rows come after every mechanical row.
+  assert.equal(c.rows.findIndex((r) => r.id.startsWith("judge.")), c.rows.length - 3);
+  assert.deepEqual(c.judged, { model: "claude-sonnet-4-5", provider: "anthropic" });
+  assert.deepEqual(c.warnings, []);
+});
+
+test("a stale verdict (hash differs or missing) keeps the verdict and says the rubric changed", () => {
+  const { rubricHash: _dropped, ...older } = verdict({ judge: "tests", preference: "tie", reason: "Both cover expiry." });
+  const c = judged({
+    record: judgeRecord([verdict({ judge: "code-quality", reason: "B keeps the error type." }), older as VerdictRecord]),
+    configured: [{ id: "code-quality", title: "Code quality", hash: "edited-hash" }, ...configured("tests")],
+  });
+
+  assert.deepEqual(judgeRows(c.rows), [
+    {
+      id: "judge.code-quality",
+      label: "Code quality",
+      previous: "",
+      candidate: "",
+      delta: "candidate preferred",
+      classification: "improved",
+      note: "B keeps the error type. — rubric changed since this verdict; run harnessbench judge --fixture ttl-cache",
+    },
+    {
+      id: "judge.tests",
+      label: "Title of tests",
+      previous: "",
+      candidate: "",
+      delta: "tie",
+      classification: "unchanged",
+      note: "Both cover expiry. — rubric changed since this verdict; run harnessbench judge --fixture ttl-cache",
+    },
+  ]);
+});
+
+test("a configured judge without a verdict is an n/a row telling the reader to run judge", () => {
+  for (const record of [null, judgeRecord([])]) {
+    const c = judged({ record, configured: configured("code-quality") });
+    assert.deepEqual(judgeRows(c.rows), [
+      { id: "judge.code-quality", label: "Title of code-quality", previous: "", candidate: "", delta: "", classification: "n/a", note: "not judged; run harnessbench judge --fixture ttl-cache" },
+    ]);
+    assert.equal(c.judged, null);
+  }
+});
+
+test("judge rows follow config order, then the file's verdicts for judges no longer configured", () => {
+  const c = judged({
+    record: judgeRecord([
+      verdict({ judge: "vibes", title: "Vibes", preference: "previous", reason: "A felt better." }),
+      verdict({ judge: "tests" }),
+      verdict({ judge: "code-quality" }),
+    ]),
+    configured: configured("code-quality", "practices", "tests"),
+  });
+
+  assert.deepEqual(
+    judgeRows(c.rows).map((r) => [r.id, r.label, r.classification]),
+    [
+      ["judge.code-quality", "Title of code-quality", "improved"],
+      ["judge.practices", "Title of practices", "n/a"],
+      ["judge.tests", "Title of tests", "improved"],
+      ["judge.vibes", "Vibes", "regressed"],
+    ],
+  );
+  assert.equal(row(c.rows, "judge.vibes").note, "A felt better. — no longer in config.judges");
+  assert.equal(row(c.rows, "judge.vibes").delta, "previous preferred");
+});
+
+test("judged names the first verdict's model and warns when the verdicts disagree", () => {
+  const c = judged({
+    record: judgeRecord([
+      verdict({ judge: "code-quality", provider: "openai", model: "gpt-5" }),
+      verdict({ judge: "tests", provider: "anthropic", model: "claude-sonnet-4-5" }),
+      verdict({ judge: "practices", provider: "openai", model: "gpt-5" }),
+    ]),
+    configured: configured("code-quality", "tests", "practices"),
+  });
+
+  assert.deepEqual(c.judged, { model: "gpt-5", provider: "openai" });
+  assert.deepEqual(c.warnings, ["judges disagree on the model: openai gpt-5 is shown; also anthropic claude-sonnet-4-5"]);
+});
+
+test("without judges configured there are no judge rows and judged is null", () => {
+  const c = judged(null);
+  assert.deepEqual(judgeRows(c.rows), []);
+  assert.equal(c.judged, null);
+  assert.deepEqual(c.rows.map((r) => r.id), ROW_IDS);
 });

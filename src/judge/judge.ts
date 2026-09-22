@@ -16,7 +16,7 @@ export const INSTRUCTIONS =
   "codebase. Judge only on the criterion above. Prefer A or B only when the evidence shows a " +
   "real difference on that criterion; otherwise answer tie. Do not reward length, effort or " +
   "thoroughness for their own sake. Your reason must name the specific evidence (a file, a " +
-  "hunk, a test, a message) that decided it, in one or two sentences. Answer with a JSON " +
+  "hunk, a test, a message) that decided it, in at most two sentences. Answer with a JSON " +
   'object with exactly two keys: "preference", whose value is "A", "B" or "tie", and "reason".';
 
 export type Preference = Position | "tie";

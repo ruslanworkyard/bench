@@ -58,6 +58,11 @@ Goal: an open-source npm package (`npx harnessbench`) people adopt. Quality over
   B, fixed by design: a first-position tilt, if any, favours the incumbent. The mapping is
   recorded in `judge.json` anyway. No truncation, ever: an item over `judge.maxContextKb`
   refuses the whole command. Only a pair of `completed` runs is judged.
+- **Verdicts are rows of the one comparison table**, never a separate block: text, `--json`
+  and markdown all carry them, because the markdown is the PR comment. A verdict carries the
+  hash of the rubric it was produced under, and the table says when a verdict is stale, missing
+  or orphaned rather than hiding it. `judge` is incremental and merges into the pair's
+  `judge.json`; `compare` never calls a model.
 - **Bin name == package name** so `npx harnessbench` works.
 
 ## File relationship between the tool and a host repo
@@ -96,7 +101,7 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
 | `agents/` | drive one external agent | `run(AgentRequest): Promise<AgentResult>` — returns every outcome, throws for none |
 | `judge/` | ask a model one question | `context.ts` (pure: pair → text), `provider.ts` (the only file that knows the AI SDK packages), `judge.ts` (`Judge` interface, `modelJudge`) |
 | `commands/` | compose the above, in order | init: detect → plan → apply → print; run: preflight → workspace → agent → record → print; judge: pair → refusals → context → model → record → print |
-| `cli.ts` | argv, exit codes; reads `.harnessbench/.env` (`env.ts`) for run/judge/compare before they preflight | nothing else |
+| `cli.ts` | argv, exit codes (set via `process.exitCode`, never `process.exit()` except in the `run` signal handler, which writes with `writeSync` first: on macOS a piped stdout is written asynchronously and `exit()` cut a long `--json` off at 8 KB); reads `.harnessbench/.env` (`env.ts`) for run/judge/compare before they preflight; installs the SIGINT/SIGTERM handler for `run` only | nothing else |
 
 **Domain nouns** — an object that appears in several layers gets its own top-level file:
 - `config.ts` — `Config` type (`baseBranch`, `testCommand`, `setupCommand`, the `agent` block,
@@ -115,7 +120,8 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
   menu `prompt | diff | tests | finalMessage | toolLog | transcript`, optional `provider` /
   `model` / `apiKeyEnv` overrides), `listJudges(root)` (duplicate ids refused, missing prompt
   file named), `requireJudge(root, id)`. Directory listing is `listFixtures` from `fixtures.ts`:
-  a catalogue is a catalogue.
+  a catalogue is a catalogue. `LoadedJudge.hash` = `rubricHash(rubric, context)`: sha256 over
+  the `prompt.md` text, a NUL, and the context list joined with commas, in order.
 - `preflight.ts` also resolves a judge's target: `requireJudgeModel` (environment
   `HARNESSBENCH_JUDGE_PROVIDER` / `HARNESSBENCH_JUDGE_MODEL` > judge.json > config; empty
   model → CliError naming the judge and the three places to set one; `openai-compatible` needs
@@ -125,6 +131,9 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
 - `workspace.ts` — a throwaway clone of the host + an isolated HOME, for one run; also the
   harness overlay (`overlayHarness`) and `rebaseline`, which folds the overlay into the clone's
   single commit so the agent sees a plain checkout and `diff()` measures only the agent's work.
+  Keeps a module-level registry of live workspaces and, per workspace, the children `exec` has
+  running; `abortAll({ keep })` (sync, for the signal handler) kills every child's process
+  group with SIGKILL and removes the directories unless `keep`.
 - `run-record.ts` — `RunRecord` (`run.json`, `schema: 2`), `Environment`, `CommandResult`
   (the shape of both `setup` and `tests`: command, exitCode, durationMs, timedOut),
   `writeRunRecord`, `readRunRecord`.
@@ -148,14 +157,30 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
   `run` always writes it; `compare` shows those rows as `n/a`, "recorded by an earlier
   version". Sub-agent tokens are part of the run's totals, reported per thread, never
   subtracted.
-- `compare.ts` — `compare(previous, candidate): Comparison`, pure: one `Row` per criterion
-  (`id`, `label`, display strings, `delta`, `classification`, optional `note`) plus `warnings`.
+- `compare.ts` — `compare(previous, candidate, judgement: JudgeInput | null): Comparison`, pure:
+  one `Row` per criterion (`id`, `label`, display strings, `delta`, `classification`, optional
+  `note`) plus `warnings` and `judged` (`{provider, model}` of the first verdict, null without
+  one; verdicts disagreeing on the model add a warning). `JudgeInput` = `{record: JudgeRecord |
+  null, configured: [{id, title, hash}]}`. Judge rows come after the mechanical rows, ids
+  `judge.<judge-id>`: configured judges in config order, then the file's verdicts for judges no
+  longer configured. Empty previous/candidate cells; delta `candidate preferred | previous
+  preferred | tie` → improved/regressed/unchanged; note = the reason, plus ` — rubric changed
+  since this verdict; run harnessbench judge --fixture <id>` when `rubricHash` differs or is
+  missing, or ` — no longer in config.judges` for an orphan; a configured judge without a
+  verdict is `n/a`, `not judged; run harnessbench judge --fixture <id>`. Null `judgement` (no
+  judges configured) → no judge rows, no heading.
   The noise thresholds are one table in this file (relative 0.15, 0.20 for diff and the
   read counts; absolute floors turns 3, tool calls 3, toolFailures 1, files 1, lines 20,
   readsBeforeFirstEdit 3, duplicateReads 2); a delta must clear both. `subAgents` is
   `neutral`: always `unchanged`, delta shown, note lists `<tool> on <model>` per side.
-  No composite, no verdict. `commands/compare.ts` loads a pair (two ids, or the latest
-  invocation for `--fixture`), orders it by environment, refuses mismatches, prints.
+  No composite. `commands/compare.ts` loads a pair (two ids, or the latest invocation for
+  `--fixture`), orders it by environment, refuses mismatches, prints. It also owns
+  `findJudgeRecord(runsDir, previous, candidate)` (the `*-<fixture>-judge` directory whose
+  `judge.json` names both run ids, not the one with the pair's stamp; unreadable or foreign
+  files are skipped) and `loadJudgement(root, config, previous, candidate)` (null when
+  `config.judges` is empty; a configured judge missing from the catalogue is `judge`'s
+  `CliError`). The file name and schema number are repeated there rather than imported, so its
+  import of `commands/judge.ts` stays type-only (judge.ts imports `loadPair` from it).
 - `judge/context.ts` — pure. `assembleContext(items, pair)`: the fixture prompt once under
   `# Task`, then `# Attempt A` and `# Attempt B`, each with the judge's other items in menu
   order (`diff` verbatim; `tests` as `passed | failed | not configured`, never the log;
@@ -171,14 +196,25 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
   reply and the prompt so the command can keep them). Any other model error is a `CliError`
   naming the judge. `translate(preference)` maps A/B back to previous/candidate.
 - `commands/judge.ts` — `judge(options, deps)` for the CLI, `judgePair(root, config, previous,
-  candidate, deps)` shared with `run --judge`. Refusals, all before any model call: a side not
-  `completed`; the pair invalid (`loadPair`/`orderPair` from `commands/compare.ts`); unknown
-  judge id or empty list; unresolved model; key variable unset; a run without `diff.patch` or
-  `transcript.jsonl`; any oversize item across the union of every judge's context. Then the
-  judges run sequentially; the `-judge` directory is created only once judging goes ahead and
-  replaces an earlier one for the same stamp. `JudgeRecord` (`schema: 1`) lives here, like
-  `Comparison` lives in `compare.ts`. `deps.judgeFor(target)` is the seam tests use to hand in
-  `ai/test`'s `MockLanguageModelV4`; `cli.ts` passes nothing.
+  candidate, deps, all)` shared with `run --judge` (which passes `all = true`: its pair is new).
+  Refusals, all before any model call: a side not `completed`; the pair invalid
+  (`loadPair`/`orderPair` from `commands/compare.ts`); unknown judge id or empty list; and, for
+  the judges that will actually be called: unresolved model, key variable unset, a run without
+  `diff.patch` or `transcript.jsonl`, any oversize item across the union of their contexts.
+  Merge semantics: the pair's existing `judge.json` is found by run ids; a configured judge
+  whose verdict carries the current `rubricHash` is kept (no call), one whose hash differs or
+  is missing (an older file) is judged, `--all` judges every configured judge; verdicts for
+  judges no longer configured ride along untouched, after the configured ones. `VerdictRecord`
+  has `rubricHash`; `JudgeRecord.schema` stays 1. Atomic write: the new directory is assembled
+  as `<dir>.tmp` (kept verdicts' `prompt.txt`/`response.json` copied across), then the old dir
+  is renamed to `<dir>.old`, `.tmp` renamed over, `.old` removed; a `VerdictError` mid-judge
+  leaves the old directory untouched and names `<dir>.tmp/<judge>/` as where the reply is. A
+  leftover `.tmp` is removed at the start of the next judging. `judgePair` returns `{record,
+  judged, kept}`; `judge` prints `formatJudging` (header, then per configured judge the
+  verdict line or `kept (rubric unchanged)`) followed by `formatComparison`, `--json` prints
+  the `Comparison`. `JudgeRecord` (`schema: 1`) lives here, like `Comparison` lives in
+  `compare.ts`. `deps.judgeFor(target)` is the seam tests use to hand in `ai/test`'s
+  `MockLanguageModelV4`; `cli.ts` passes nothing.
 - `env.ts` — `loadEnvFile(root, env = process.env): string[]`: `.harnessbench/.env` via
   `util.parseEnv`, set-if-unset, returns the names it set (tests only). Missing file → `[]`;
   unreadable or malformed → `CliError` naming the file and a line number, never a value.
@@ -276,8 +312,9 @@ a fake shell script stands in, so the suite is free, offline and deterministic.
   Not yet done: one real run with a real key (`npx . run ttl-cache --max-turns 20 --keep`) and
   reading its `run.json`, `diff.patch`, `transcript.jsonl` by hand.
 
-- Both environments (2026-09-20). `run <fixture>` now runs `previous` then `candidate`,
-  sequentially, each in its own workspace and run directory; the two ids share one timestamp
+- Both environments (2026-09-20). `run <fixture>` now runs `previous` then `candidate`
+  (sequentially at the time; both at once since 2026-09-22, see below), each in its own
+  workspace and run directory; the two ids share one timestamp
   and differ only in the suffix. `previous` = the harness as committed at
   `git merge-base <base> HEAD`, on HEAD's code; no merge base (orphan branch, shallow host) is
   a preflight error naming `--base` and `git fetch --unshallow`.
@@ -378,13 +415,52 @@ a fake shell script stands in, so the suite is free, offline and deterministic.
   refusal prints one `judging skipped: <why>` line on stderr and keeps the run's exit code; it
   does not preflight the judge before the agents run, so an unset model is found out only
   after both sides ran (spec'd that way; cheap to add if it bites). Usage per verdict is
-  summed over attempts. Not built: judge rows in `compare`, position swap, per-judge
-  concurrency, a real call to a real provider.
+  summed over attempts. Not built: position swap, per-judge concurrency, a real call to a real
+  provider. (The separate verdict block and `formatVerdicts` were replaced by judge rows in
+  the table on 2026-09-22, below.)
 
 - `.harnessbench/.env` (2026-09-22). See the credentials decision above and `env.ts`. Credential
   errors in `preflight.ts` now end "set X in your environment or in .harnessbench/.env".
   `engines.node` is `>=20.12`. `plan.ts`'s `appendLine` became `appendLines` so one
   `.gitignore` op manages both lines and the Files report shows the file once.
+
+- Judge rows and incremental judging (2026-09-22). See `compare.ts`, `commands/compare.ts`,
+  `commands/judge.ts` and `judges.ts` above. `formatVerdicts` is gone: `run --judge`, `compare`
+  and `judge` all print `formatComparison`; `run --json` prints `[previous, candidate,
+  comparison]` and no longer appends the judge record (the rows carry the verdicts). Text
+  rendering: after the mechanical rows, a blank line and `judged by <provider> <model>` (or
+  `judges: not run` when no verdict exists), then the judge rows in the same columns; an empty
+  candidate cell prints no arrow. A judge row's note wraps to 100 columns total, continuation
+  lines indented to the note column; the note column is never narrower than 40 (with a
+  `candidate preferred` delta the other columns already reach column 80, so in practice the
+  lines run to ~120), mechanical notes stay on one line. Markdown: the same rows in the one
+  table, the whole reason in the note cell, `Judged by …` / `Judges: not run.` as a sentence
+  above the table. `judge --all` flag. The instruction block now says "in at most two
+  sentences". `run` loads the judgement even without `--judge`, so the table shows `not
+  judged` rows; a config whose judges cannot be loaded costs the rows (`judge rows skipped:` on
+  stderr), not the run. Not built: roll-ups across judges or fixtures, gating, position swap.
+
+- Concurrent sides and clean interruption (2026-09-22). `run` starts both `runSide` calls
+  and awaits `Promise.allSettled`; records stay in `ENVIRONMENTS` order (`previous`,
+  `candidate`) whatever finished first, so wall clock is the slower side, not the sum.
+  `runSide` itself is unchanged apart from a `progress(event)` callback in its `Side`.
+  Failure semantics: one side's `CliError` never cancels the other; the error is the failed
+  side's message plus "the <env> side ran and its record is at ..." for the completed one;
+  both failing joins both messages with the larger exit code; a non-`CliError` is rethrown.
+  Progress: nothing on stdout until both sides are done; one line per event on stderr
+  (`[mm:ss] <env>  started | setup ok/failed | agent <outcome> (N turns) | tests
+  passed/failed/not configured | recorded <run dir>`), `formatProgress` in `print.ts`,
+  `ProgressEvent` union in `commands/run.ts`, one clock from the `run` invocation. `--json`
+  keeps stdout pure JSON. Interruption: the agents run detached, so the terminal's Ctrl-C
+  never reaches them; `cli.ts` installs one SIGINT/SIGTERM handler for `run` only, which
+  writes `harnessbench: interrupted, stopping N run(s)`, calls `workspace.abortAll({ keep })`,
+  lists kept paths with `--keep`, and `process.exit(130)`; a second signal is ignored. An
+  interrupted run leaves its run directories with whatever was written (`raw.jsonl`,
+  `setup.log`) and no `run.json`; nothing else on the host is cleaned up, and the existing
+  "unreadable" handling covers it downstream. Tests never `pgrep`: the fakes write pids and
+  marks to `FAKE_CLAUDE_MARKS`, named by run id; `fake-claude.sh` writes its dump atomically
+  (`mv`) because both sides now share the path at the same time. Not built: several fixtures
+  per invocation, `--concurrency`, baseline reuse.
 
 ## Next
 
@@ -393,8 +469,7 @@ a fake shell script stands in, so the suite is free, offline and deterministic.
 2. Real-agent smoke of `run` (see above); fix what the real stream shows that the recording
    did not. Then `judge` on that pair with a real model: read `prompt.txt` and the verdicts by
    hand; revise the three draft rubrics from what the model actually did with them.
-3. Judge rows in `compare` (`judge: candidate preferred` as a row per judge, from the latest
-   `-judge` directory of the pair); then position swap as an opt-in second call.
+3. Position swap as an opt-in second judge call.
 4. GitHub Action that comments `compare --markdown` on PRs touching harness files.
    Cache `previous` by harness hash so a PR pays only for the candidate side.
 5. More agent adapters (Codex, Aider, Gemini CLI, OpenCode, Pi): implement `AgentAdapter` and

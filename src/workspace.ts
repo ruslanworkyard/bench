@@ -1,5 +1,5 @@
-import { execFile, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { existsSync, rmSync } from "node:fs";
 import { chmod, mkdir, readdir, realpath, rm, rmdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
@@ -15,6 +15,9 @@ const MAX_BUFFER = 64 * 1024 * 1024;
 
 /** The overlay never writes here: git internals, and our own state. */
 const OVERLAY_SKIP = new Set([".git", ".harnessbench"]);
+
+/** Every workspace created and not yet destroyed, so an interrupted run can take them all down. */
+const live = new Set<Workspace>();
 
 export type WorkspaceOptions = {
   /** Absolute path to the repository being copied. It is only ever read. */
@@ -50,6 +53,8 @@ export class Workspace {
   readonly tree: string;
   readonly home: string;
   readonly headSha: string;
+  /** The commands `exec` has running right now; each is the leader of its own process group. */
+  private readonly children = new Set<ChildProcess>();
 
   constructor(dir: string, headSha: string) {
     this.dir = dir;
@@ -69,6 +74,7 @@ export class Workspace {
         detached: true,
         stdio: ["pipe", "pipe", "pipe"],
       });
+      this.children.add(child);
 
       // A command that exits without reading its input is its own business, not an error.
       child.stdin.on("error", () => {});
@@ -91,10 +97,12 @@ export class Workspace {
 
       child.on("error", (error) => {
         clearTimeout(timer);
+        this.children.delete(child);
         reject(error);
       });
       child.on("close", (exitCode) => {
         clearTimeout(timer);
+        this.children.delete(child);
         resolve({ exitCode, timedOut, durationMs: Date.now() - started });
       });
     });
@@ -145,9 +153,38 @@ export class Workspace {
     return await git(["diff", "HEAD", "--", ".", ":(exclude).harnessbench"], this.tree);
   }
 
+  /** Kills every running command's whole process group, as a timeout would. */
+  killChildren(): void {
+    for (const child of this.children) killGroup(child.pid);
+    this.children.clear();
+  }
+
   async destroy(): Promise<void> {
+    live.delete(this);
     await rm(this.dir, { recursive: true, force: true });
   }
+}
+
+/** How many workspaces exist right now: the runs an interruption would stop. */
+export function liveWorkspaces(): number {
+  return live.size;
+}
+
+/**
+ * Stops every live workspace at once: kills its commands' process groups (SIGKILL: the
+ * terminal's Ctrl-C never reached them, being detached) and, unless `keep`, removes its
+ * directory. Synchronous, because the caller is a signal handler about to exit the process.
+ * Returns the directories kept or removed.
+ */
+export function abortAll({ keep }: { keep: boolean }): string[] {
+  const paths: string[] = [];
+  for (const workspace of live) {
+    workspace.killChildren();
+    if (!keep) rmSync(workspace.dir, { recursive: true, force: true });
+    paths.push(workspace.dir);
+  }
+  live.clear();
+  return paths;
 }
 
 /** Clones the host repository at `ref` into a fresh temp directory. */
@@ -179,7 +216,9 @@ export async function createWorkspace(options: WorkspaceOptions): Promise<Worksp
   // An empty hooks directory, so the host's hooks never run against the clone.
   await git(["config", "core.hooksPath", hooks], tree);
 
-  return new Workspace(dir, (await git(["rev-parse", "HEAD"], tree)).trim());
+  const workspace = new Workspace(dir, (await git(["rev-parse", "HEAD"], tree)).trim());
+  live.add(workspace);
+  return workspace;
 }
 
 /** Creates a workspace, runs `fn`, and destroys it unless `keep` is set. */

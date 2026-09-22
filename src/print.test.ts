@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import type { Comparison, Row } from "./compare.js";
-import { NOISE_LINE, formatComparison, formatComparisonMarkdown, formatRun } from "./print.js";
+import { NOISE_LINE, formatComparison, formatComparisonMarkdown, formatProgress, formatRun } from "./print.js";
 import type { RunRecord } from "./run-record.js";
 
 function row(patch: Partial<Row> & { id: string; label: string }): Row {
@@ -24,6 +24,7 @@ function comparison(warnings: string[] = []): Comparison {
       row({ id: "durationMs", label: "Duration", previous: "3m48s", candidate: "1h02m", delta: "+1,532%", classification: "regressed" }),
     ],
     warnings,
+    judged: null,
   };
 }
 
@@ -154,4 +155,110 @@ test("formatRun summarises threads and phases on one line each", () => {
   const old = formatRun(earlier as RunRecord, "/nonexistent/agent.stderr.log").split("\n");
   assert.ok(old.includes("Threads    not recorded"));
   assert.ok(old.includes("Phases     not recorded"));
+});
+
+/** The mechanical rows above plus two judge rows, one with a long note. */
+function withJudges(judged: Comparison["judged"], note: string): Comparison {
+  const c = comparison();
+  return {
+    ...c,
+    judged,
+    rows: [
+      ...c.rows,
+      row({ id: "judge.code-quality", label: "Code quality", previous: "", candidate: "", delta: "candidate preferred", classification: "improved", note }),
+      row({ id: "judge.test-quality", label: "Test quality", previous: "", candidate: "", delta: "", classification: "n/a", note: "not judged; run harnessbench judge --fixture ttl-cache" }),
+    ],
+  };
+}
+
+const LONG_REASON =
+  "B's TtlCache keeps the existing error type in read.ts while A introduces a second one; " +
+  "B's eviction test covers expiry through the public get/set — rubric changed since this verdict; run harnessbench judge --fixture ttl-cache";
+
+test("formatComparison puts the judge rows under their own heading, in the same columns, with the note wrapped", () => {
+  const text = formatComparison(withJudges({ provider: "anthropic", model: "claude-sonnet-4-5" }, LONG_REASON));
+  const lines = text.split("\n");
+
+  const heading = lines.indexOf("judged by anthropic claude-sonnet-4-5");
+  assert.notEqual(heading, -1);
+  assert.equal(lines[heading - 1], "", "a blank line separates the judge rows from the mechanical ones");
+  assert.match(lines[heading - 2] as string, /^Duration/);
+
+  const codeQuality = lines[heading + 1] as string;
+  assert.match(codeQuality, /^Code quality\s+candidate preferred\s+improved\s+B's TtlCache/);
+  // Same columns as the mechanical rows: the classification word starts where it does above.
+  const words = [...lines.slice(heading - 6, heading - 1), codeQuality].map((line) => line.search(/unchanged|improved|regressed|n\/a/));
+  assert.equal(new Set(words).size, 1, `classifications at ${words.join(", ")}`);
+  // A bare arrow is not printed for an empty candidate cell.
+  assert.doesNotMatch(codeQuality, /→/);
+
+  // The note wraps to 100 columns, or to a 40-wide note column when the other columns leave
+  // less than that; continuation lines start at the note column.
+  const noteAt = codeQuality.indexOf("B's TtlCache");
+  const limit = Math.max(100, noteAt + 40);
+  const noteLines = [codeQuality];
+  for (let i = heading + 2; i < lines.length && lines[i]?.startsWith(" "); i++) noteLines.push(lines[i] as string);
+  assert.ok(noteLines.length >= 3, `expected a wrapped note, got:\n${noteLines.join("\n")}`);
+  for (const line of noteLines) assert.ok(line.length <= limit, `over ${limit} columns: ${line}`);
+  assert.ok(noteLines.some((line) => line.length > limit - 12), "lines are filled, not wrapped early");
+  for (const line of noteLines.slice(1)) {
+    assert.equal(line.search(/\S/), noteAt, `continuation not aligned: ${JSON.stringify(line)}`);
+  }
+  assert.equal(noteLines.map((line) => line.slice(noteAt)).join(" "), LONG_REASON);
+
+  const notJudged = lines[heading + 1 + noteLines.length] as string;
+  assert.match(notJudged, /^Test quality\s+n\/a\s+not judged; run harnessbench judge$/);
+  assert.equal(lines[heading + 2 + noteLines.length], `${" ".repeat(noteAt)}--fixture ttl-cache`);
+  // The mechanical rows are not wrapped.
+  assert.equal(lines.filter((line) => line.startsWith("Tool calls")).length, 1);
+});
+
+test("formatComparison says judges: not run when no verdict exists, and nothing at all without judge rows", () => {
+  const text = formatComparison(withJudges(null, ""));
+  assert.match(text, /\n\njudges: not run\nCode quality/);
+  assert.doesNotMatch(formatComparison(comparison()), /judge/);
+});
+
+test("formatComparisonMarkdown puts the judge rows in the same table with the whole reason, under a sentence", () => {
+  const text = formatComparisonMarkdown(withJudges({ provider: "anthropic", model: "claude-sonnet-4-5" }, LONG_REASON));
+  const lines = text.split("\n");
+
+  const header = lines.indexOf("| Criterion | Previous | Candidate | Delta | Result | Note |");
+  assert.equal(lines[header - 2], "Judged by anthropic claude-sonnet-4-5.");
+  assert.equal(lines[header - 1], "");
+  assert.equal(lines.slice(header + 2).length, 7, "every row, mechanical and judge, in one table");
+  assert.equal(lines.at(-2), `| Code quality |  |  | candidate preferred | improved | ${LONG_REASON} |`);
+  assert.equal(lines.at(-1), "| Test quality |  |  |  | n/a | not judged; run harnessbench judge --fixture ttl-cache |");
+
+  assert.match(formatComparisonMarkdown(withJudges(null, "")), /\nJudges: not run\.\n\n\| Criterion/);
+  assert.doesNotMatch(formatComparisonMarkdown(comparison()), /[Jj]udge/);
+});
+
+test("formatProgress puts one clock and one aligned environment column before every event", () => {
+  const ok = { command: "npm ci", exitCode: 0, durationMs: 800, timedOut: false };
+  const failed = { command: "npm test", exitCode: 1, durationMs: 18_400, timedOut: false };
+  const lines = [
+    formatProgress(0, "previous", { kind: "started" }),
+    formatProgress(1_200, "candidate", { kind: "setup", result: ok }),
+    formatProgress(1_200, "candidate", { kind: "setup", result: { ...failed, command: "npm ci" } }),
+    formatProgress(301_000, "previous", { kind: "agent", outcome: "completed", turns: 30 }),
+    formatProgress(346_000, "candidate", { kind: "agent", outcome: "max_turns", turns: 1 }),
+    formatProgress(319_000, "previous", { kind: "tests", result: { ...ok, command: "npm test", durationMs: 18_000 } }),
+    formatProgress(319_000, "previous", { kind: "tests", result: failed }),
+    formatProgress(319_000, "previous", { kind: "tests", result: { ...failed, exitCode: null, timedOut: true } }),
+    formatProgress(319_000, "previous", { kind: "tests", result: null }),
+    formatProgress(3_600_000, "previous", { kind: "recorded", runId: "20260922-101500-ttl-cache-previous" }),
+  ];
+  assert.deepEqual(lines, [
+    "[00:00] previous   started",
+    "[00:01] candidate  setup ok (npm ci, 0.8s)",
+    "[00:01] candidate  setup failed (npm ci, exit 1, 18s)",
+    "[05:01] previous   agent completed (30 turns)",
+    "[05:46] candidate  agent max_turns (1 turn)",
+    "[05:19] previous   tests passed (18s)",
+    "[05:19] previous   tests failed (exit 1, 18s)",
+    "[05:19] previous   tests failed (timed out, 18s)",
+    "[05:19] previous   tests not configured",
+    "[60:00] previous   recorded .harnessbench/runs/20260922-101500-ttl-cache-previous",
+  ]);
 });

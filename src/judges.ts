@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,8 +32,16 @@ export type JudgeMeta = {
   apiKeyEnv: string | null;
 };
 
-/** A judge as it exists in the host repository, rubric read. */
-export type LoadedJudge = { dir: string; meta: JudgeMeta; rubric: string };
+/**
+ * A judge as it exists in the host repository, rubric read. `hash` identifies the rubric a
+ * verdict was produced under: a verdict whose `rubricHash` differs is stale.
+ */
+export type LoadedJudge = { dir: string; meta: JudgeMeta; rubric: string; hash: string };
+
+/** sha256 over the rubric text plus the context list, in order. */
+export function rubricHash(rubric: string, context: readonly ContextItem[]): string {
+  return createHash("sha256").update(rubric).update("\0").update(context.join(",")).digest("hex");
+}
 
 const KNOWN_KEYS = ["id", "title", "description", "prompt", "context", "provider", "model", "apiKeyEnv"];
 
@@ -127,7 +136,8 @@ function loadJudge(dir: string, shown: string): LoadedJudge {
   if (!existsSync(promptPath)) {
     throw new CliError(`judge '${meta.id}' names prompt "${meta.prompt}", but ${shown}/${meta.prompt} does not exist`);
   }
-  return { dir, meta, rubric: readFileSync(promptPath, "utf8") };
+  const rubric = readFileSync(promptPath, "utf8");
+  return { dir, meta, rubric, hash: rubricHash(rubric, meta.context) };
 }
 
 /**
