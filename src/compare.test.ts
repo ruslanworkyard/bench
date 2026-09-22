@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import type { JudgeRecord, VerdictRecord } from "./commands/judge.js";
-import { compare, type Classification, type JudgeInput, type Row } from "./compare.js";
+import { compare, rollup, type Classification, type Comparison, type JudgeInput, type Row } from "./compare.js";
 import type { RunRecord } from "./run-record.js";
 import type { Telemetry } from "./telemetry.js";
 
@@ -473,4 +473,62 @@ test("without judges configured there are no judge rows and judged is null", () 
   assert.deepEqual(judgeRows(c.rows), []);
   assert.equal(c.judged, null);
   assert.deepEqual(c.rows.map((r) => r.id), ROW_IDS);
+});
+
+// --- rollup ---
+
+/** A comparison of `fixture` with the given rows; only ids and classifications matter here. */
+function comparisonOf(fixture: string, rows: Array<[string, Classification]>, warnings: string[] = []): Comparison {
+  const label = (id: string): string => id.replace(/^judge\./, "Judge ").replace(/^./, (c) => c.toUpperCase());
+  return {
+    fixture,
+    headSha: "0123456789abcdef0123456789abcdef01234567",
+    previous: { runId: `s-${fixture}-previous`, harnessSha: "a", model: "m" },
+    candidate: { runId: `s-${fixture}-candidate`, harnessSha: "b", model: "m" },
+    rows: rows.map(([id, classification]) => ({ id, label: label(id), previous: "", candidate: "", delta: "", classification })),
+    warnings,
+    judged: null,
+  };
+}
+
+test("rollup counts fixtures per classification, naming them, one row per criterion seen anywhere", () => {
+  const result = rollup([
+    comparisonOf("list-runs", [["outcome", "unchanged"], ["turns", "improved"], ["costUsd", "unchanged"], ["judge.code-quality", "regressed"]]),
+    // n/a rows, and no judge rows at all.
+    comparisonOf("ttl-cache", [["outcome", "unchanged"], ["turns", "n/a"], ["costUsd", "n/a"]], ["previous did not complete (timeout)"]),
+    comparisonOf("announcements", [["outcome", "regressed"], ["turns", "regressed"], ["costUsd", "unchanged"], ["judge.code-quality", "improved"]]),
+  ]);
+
+  assert.equal(result.fixtures, 3);
+  assert.deepEqual(result.rows, [
+    { id: "outcome", label: "Outcome", improved: [], regressed: ["announcements"], unchanged: ["list-runs", "ttl-cache"], na: [] },
+    { id: "turns", label: "Turns", improved: ["list-runs"], regressed: ["announcements"], unchanged: [], na: ["ttl-cache"] },
+    { id: "costUsd", label: "CostUsd", improved: [], regressed: [], unchanged: ["list-runs", "announcements"], na: ["ttl-cache"] },
+    { id: "judge.code-quality", label: "Judge code-quality", improved: ["announcements"], regressed: ["list-runs"], unchanged: [], na: [] },
+  ]);
+  assert.deepEqual(result.warnings, ["ttl-cache: previous did not complete (timeout)"]);
+  // Every count is a list, and every fixture lands in exactly one bucket per row it has.
+  for (const row of result.rows) {
+    const all = [...row.improved, ...row.regressed, ...row.unchanged, ...row.na];
+    assert.equal(new Set(all).size, all.length, row.id);
+  }
+});
+
+test("rollup keeps mechanical rows before judge rows even when the first comparison has judge rows and a later one a new mechanical row", () => {
+  const result = rollup([
+    comparisonOf("a", [["outcome", "unchanged"], ["judge.code-quality", "improved"]]),
+    comparisonOf("b", [["outcome", "unchanged"], ["turns", "improved"], ["judge.test-quality", "unchanged"], ["judge.code-quality", "unchanged"]]),
+  ]);
+
+  assert.deepEqual(result.rows.map((row) => row.id), ["outcome", "turns", "judge.code-quality", "judge.test-quality"]);
+  assert.deepEqual(result.rows[1], { id: "turns", label: "Turns", improved: ["b"], regressed: [], unchanged: [], na: [] });
+});
+
+test("rollup of nothing is empty, and of one comparison mirrors its rows", () => {
+  assert.deepEqual(rollup([]), { fixtures: 0, rows: [], warnings: [] });
+
+  const one = rollup([comparisonOf("x", [["outcome", "improved"]], ["w1", "w2"])]);
+  assert.equal(one.fixtures, 1);
+  assert.deepEqual(one.rows, [{ id: "outcome", label: "Outcome", improved: ["x"], regressed: [], unchanged: [], na: [] }]);
+  assert.deepEqual(one.warnings, ["x: w1", "x: w2"]);
 });

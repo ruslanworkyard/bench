@@ -1,13 +1,22 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
-import { compare as compareRecords, type Comparison, type JudgeInput } from "../compare.js";
+import { compare as compareRecords, rollup, type Comparison, type JudgeInput, type Rollup } from "../compare.js";
 import { RUNS_DIR, type Config } from "../config.js";
 import { CliError } from "../errors.js";
 import { requireJudge } from "../judges.js";
 import { requireConfig, requireGit, requireRepo } from "../preflight.js";
-import { formatComparison, formatComparisonMarkdown } from "../print.js";
-import { readRunRecord, type RunRecord } from "../run-record.js";
+import { formatBatch, formatBatchMarkdown, formatComparison, formatComparisonMarkdown } from "../print.js";
+import {
+  ENVIRONMENTS,
+  RUN_ID,
+  latestBatch,
+  listBatches,
+  readRunRecord,
+  type Batch,
+  type Environment,
+  type RunRecord,
+} from "../run-record.js";
 // Type-only: judge.ts imports this file for the pair loader, so the file name and schema
 // number are repeated below rather than imported.
 import type { JudgeRecord } from "./judge.js";
@@ -36,6 +45,117 @@ export function compare(options: CompareOptions): Comparison {
   else if (options.markdown) console.log(formatComparisonMarkdown(comparison));
   else console.log(formatComparison(comparison));
   return comparison;
+}
+
+export type CompareBatchOptions = {
+  cwd: string;
+  /** The batch with this stamp; when absent, the latest batch with at least one complete pair. */
+  stamp?: string | undefined;
+  json: boolean;
+  markdown: boolean;
+};
+
+/** One fixture of a compared batch: its table, or why it has none. */
+export type BatchFixtureComparison = { fixture: string; comparison: Comparison | null; error: string | null };
+
+/** A batch compared: the shape `--json` prints, minus what `run` adds. */
+export type BatchComparison = { stamp: string; fixtures: BatchFixtureComparison[]; rollup: Rollup };
+
+/**
+ * The delta tables of every complete pair in one batch, under their roll-up. A pair with a
+ * missing side is listed with the reason and compared with nothing; a batch with no complete
+ * pair at all is refused.
+ */
+export function compareBatch(options: CompareBatchOptions): BatchComparison {
+  requireGit();
+  const root = requireRepo(options.cwd);
+  const config = requireConfig(root);
+  const batch = loadBatch(root, options.stamp);
+  const result = compareBatchRecords(root, config, batch);
+  const headSha = headShaOf(result);
+
+  if (options.json) console.log(JSON.stringify(result, null, 2));
+  else if (options.markdown) console.log(formatBatchMarkdown(result.rollup, result.fixtures, headSha));
+  else console.log(formatBatch(result.rollup, result.fixtures, headSha));
+  return result;
+}
+
+/** The code a batch ran on: every record agrees, so the first complete pair's says. */
+export function headShaOf(result: BatchComparison): string {
+  return result.fixtures.find((each) => each.comparison !== null)?.comparison?.headSha ?? "";
+}
+
+/**
+ * The batch a command was pointed at: `--stamp`, or the newest batch with a complete pair.
+ * Refused, naming the stamp and what is missing, when it has no pair to compare.
+ */
+export function loadBatch(root: string, stamp: string | undefined): Batch {
+  const runsDir = join(root, RUNS_DIR);
+  let batch: Batch | null;
+  if (stamp === undefined) {
+    batch = latestBatch(runsDir, (each) => each.pairs.some(complete));
+    if (batch === null) {
+      const seen = listBatches(runsDir);
+      const why = seen.length === 0 ? `no runs in ${RUNS_DIR}` : `no complete previous/candidate pair in ${RUNS_DIR}`;
+      throw new CliError(`${why} - run \`harnessbench run\` first, or name two run ids`, 1);
+    }
+  } else {
+    batch = listBatches(runsDir).find((each) => each.stamp === stamp) ?? null;
+    if (batch === null) {
+      const stamps = listBatches(runsDir).map((each) => `  ${each.stamp}`);
+      const known = stamps.length === 0 ? `no runs in ${RUNS_DIR}` : `stamps in ${RUNS_DIR}:\n${stamps.join("\n")}`;
+      throw new CliError(`no runs with stamp '${stamp}'\n\n${known}`, 1);
+    }
+    if (!batch.pairs.some(complete)) {
+      throw new CliError(
+        `batch ${stamp} has no complete previous/candidate pair:\n${batch.pairs.map((pair) => `  ${describePair(runsDir, stamp, pair)}`).join("\n")}`,
+        1,
+      );
+    }
+  }
+  return batch;
+}
+
+function complete(pair: Batch["pairs"][number]): boolean {
+  return pair.previous !== null && pair.candidate !== null;
+}
+
+/** `ttl-cache: candidate side missing` or `... unreadable`, for every side a pair lacks. */
+export function describePair(runsDir: string, stamp: string, pair: Batch["pairs"][number]): string {
+  const missing = ENVIRONMENTS.filter((environment) => pair[environment] === null).map((environment: Environment) => {
+    const dir = join(runsDir, `${stamp}-${pair.fixture}-${environment}`);
+    return `${environment} side ${existsSync(dir) ? "unreadable (no valid run.json)" : "missing"}`;
+  });
+  return `${pair.fixture}: ${missing.join(", ")}`;
+}
+
+/**
+ * Every pair of a batch compared, in fixture order. A pair that cannot be compared (a side
+ * missing, or the two records not a valid pair) is kept with the reason as its error, so the
+ * roll-up counts only what was compared and the reader still sees the rest.
+ */
+export function compareBatchRecords(root: string, config: Config, batch: Batch): BatchComparison {
+  const runsDir = join(root, RUNS_DIR);
+  const fixtures = batch.pairs.map((pair): BatchFixtureComparison => {
+    if (pair.previous === null || pair.candidate === null) {
+      return { fixture: pair.fixture, comparison: null, error: describePair(runsDir, batch.stamp, pair) };
+    }
+    let ordered: [RunRecord, RunRecord];
+    try {
+      ordered = orderPair([pair.previous, pair.candidate]);
+    } catch (error) {
+      if (!(error instanceof CliError)) throw error;
+      return { fixture: pair.fixture, comparison: null, error: error.message };
+    }
+    // A judge the config names but the catalogue lacks is the same refusal a single compare gives.
+    const judgement = loadJudgement(root, config, ...ordered);
+    return { fixture: pair.fixture, comparison: compareRecords(...ordered, judgement), error: null };
+  });
+  return {
+    stamp: batch.stamp,
+    fixtures,
+    rollup: rollup(fixtures.flatMap((each) => (each.comparison === null ? [] : [each.comparison]))),
+  };
 }
 
 /**
@@ -151,9 +271,6 @@ export function findJudgeRecord(
   }
   return null;
 }
-
-/** `<stamp>-<fixture>-<environment>`. A `-judge` directory is not a run and never matches. */
-export const RUN_ID = /^(\d{8}-\d{6})-(.+)-(previous|candidate)$/;
 
 /** The newest `run` invocation of `fixture` that left both a previous and a candidate directory. */
 export function latestPair(runsDir: string, fixture: string): [string, string] {

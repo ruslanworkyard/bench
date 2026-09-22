@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 
 import type { Comparison } from "../compare.js";
+import type { BatchComparison } from "./compare.js";
 import { CONFIG_FILE, JUDGES_DIR, RUNS_DIR, defaults } from "../config.js";
 import { listJudges, packagedJudgesDir } from "../judges.js";
 import * as print from "../print.js";
@@ -229,13 +230,128 @@ test("compare refuses an unreadable run, naming it", () => {
   assert.match(fails(root, a, bad).stderr, new RegExp(`cannot read run '${bad}': .*not valid JSON`));
 });
 
-test("compare needs two ids or --fixture, and refuses --json with --markdown", () => {
+test("compare takes two ids or none, one way of addressing at a time, and refuses --json with --markdown", () => {
   const root = repo();
   const [previous, candidate] = writePair(root, "20260919-100000");
 
-  assert.equal(fails(root).status, 2);
   assert.match(fails(root, previous).stderr, /two run ids or none/);
   assert.match(fails(root, "--json", "--markdown", previous, candidate).stderr, /exclusive/);
+  assert.match(fails(root, "--fixture", "ttl-cache", "--stamp", "20260919-100000").stderr, /--fixture and --stamp are exclusive/);
+  assert.match(fails(root, previous, candidate, "--stamp", "20260919-100000").stderr, /two run ids and --stamp are exclusive/);
+});
+
+// --- batches ---
+
+/** Two complete pairs (older), then a batch with one complete pair and one lone side (newer), then a lone candidate (newest). */
+function batches(root: string): { older: string; newer: string; newest: string } {
+  const older = "20260920-100000";
+  writePair(root, older, "announcements");
+  writePair(root, older, "ttl-cache");
+  const newer = "20260921-100000";
+  writePair(root, newer, "ttl-cache");
+  write(root, record(newer, "previous", {}, "announcements"));
+  const newest = "20260922-100000";
+  write(root, record(newest, "candidate"));
+  return { older, newer, newest };
+}
+
+test("bare compare addresses the latest batch with a complete pair, and lists its incomplete pairs", () => {
+  const root = repo();
+  const { newer } = batches(root);
+
+  const { stdout } = ok(root);
+
+  assert.match(stdout, /^harnessbench rollup {2}1 fixture · code 0123456\n/);
+  assert.match(stdout, /^── announcements ──\n\nerror: announcements: candidate side missing$/m);
+  assert.match(stdout, new RegExp(`^── ttl-cache ──\\n\\nharnessbench compare {2}ttl-cache · code 0123456\\n[\\s\\S]*Runs\\s+${newer}-ttl-cache-previous → ${newer}-ttl-cache-candidate`, "m"));
+  assert.equal(stdout.match(/^harnessbench compare /gm)?.length, 1);
+  assert.match(stdout, /^Turns\s+improved 1 \[ttl-cache\]$/m);
+});
+
+test("--stamp addresses that batch; an unknown stamp lists the ones there are; a batch with no complete pair says what is missing", () => {
+  const root = repo();
+  const { older, newer, newest } = batches(root);
+
+  const { stdout } = ok(root, "--stamp", older);
+  assert.match(stdout, /^harnessbench rollup {2}2 fixtures · code 0123456\n/);
+  assert.match(stdout, /^Turns\s+improved 2 \[announcements, ttl-cache\]$/m);
+  assert.deepEqual([...stdout.matchAll(/^── (.+) ──$/gm)].map((match) => match[1]), ["announcements", "ttl-cache"]);
+  assert.equal(stdout.match(/^harnessbench compare /gm)?.length, 2);
+  assert.match(stdout, new RegExp(`Runs\\s+${older}-announcements-previous → ${older}-announcements-candidate`));
+  assert.doesNotMatch(stdout, /error:/);
+
+  const unknown = fails(root, "--stamp", "20260101-000000");
+  assert.equal(unknown.status, 1);
+  assert.match(unknown.stderr, new RegExp(`no runs with stamp '20260101-000000'\\n\\nstamps in \\.harnessbench/runs:\\n\\s+${newest}\\n\\s+${newer}\\n\\s+${older}`));
+
+  const incomplete = fails(root, "--stamp", newest);
+  assert.equal(incomplete.status, 1);
+  assert.match(incomplete.stderr, new RegExp(`batch ${newest} has no complete previous/candidate pair:\\n\\s+ttl-cache: previous side missing`));
+});
+
+test("a batch side whose run.json cannot be read is listed as unreadable, not dropped", () => {
+  const root = repo();
+  const stamp = "20260920-100000";
+  writePair(root, stamp, "ttl-cache");
+  const [previous] = writePair(root, stamp, "announcements");
+  writeFileSync(join(root, RUNS_DIR, previous, "run.json"), "{ nope", "utf8");
+
+  const { stdout } = ok(root);
+
+  assert.match(stdout, /^── announcements ──\n\nerror: announcements: previous side unreadable \(no valid run\.json\)$/m);
+  assert.match(stdout, /^── ttl-cache ──\n\nharnessbench compare/m);
+});
+
+test("bare compare with no runs, or none complete, says so and points at run", () => {
+  const empty = repo();
+  const none = fails(empty);
+  assert.equal(none.status, 1);
+  assert.match(none.stderr, /no runs in \.harnessbench\/runs - run `harnessbench run` first/);
+
+  write(empty, record("20260920-100000", "candidate"));
+  assert.match(fails(empty).stderr, /no complete previous\/candidate pair in \.harnessbench\/runs/);
+});
+
+test("--fixture still picks the latest pair of that fixture, not the latest batch", () => {
+  const root = repo();
+  const { older } = batches(root);
+
+  const { stdout } = ok(root, "--fixture", "announcements");
+
+  assert.match(stdout, /^harnessbench compare {2}announcements/);
+  assert.match(stdout, new RegExp(`Runs\\s+${older}-announcements-previous → ${older}-announcements-candidate`));
+  assert.doesNotMatch(stdout, /rollup/);
+});
+
+test("batch --json is { stamp, fixtures, rollup } without records; --markdown folds each table into <details>", () => {
+  const root = repo(["code-quality"]);
+  const { older } = batches(root);
+  const [previous, candidate] = [`${older}-ttl-cache-previous`, `${older}-ttl-cache-candidate`];
+  writeJudge(root, older, previous, candidate, [verdict(root, "code-quality", { reason: "B is tidier." })]);
+
+  const parsed = JSON.parse(ok(root, "--json", "--stamp", older).stdout) as BatchComparison;
+  assert.equal(parsed.stamp, older);
+  assert.deepEqual(Object.keys(parsed), ["stamp", "fixtures", "rollup"]);
+  assert.deepEqual(parsed.fixtures.map((each) => [each.fixture, each.error, Object.keys(each)]), [
+    ["announcements", null, ["fixture", "comparison", "error"]],
+    ["ttl-cache", null, ["fixture", "comparison", "error"]],
+  ]);
+  assert.equal(parsed.fixtures[1]?.comparison?.judged?.model, "claude-sonnet-4-5");
+  assert.equal(parsed.rollup.fixtures, 2);
+  const judged = parsed.rollup.rows.find((row) => row.id === "judge.code-quality");
+  assert.deepEqual(judged, { id: "judge.code-quality", label: "Code quality", improved: ["ttl-cache"], regressed: [], unchanged: [], na: ["announcements"] });
+  assert.deepEqual(
+    parsed.rollup.warnings,
+    [],
+  );
+
+  const markdown = ok(root, "--markdown", "--stamp", older).stdout;
+  assert.match(markdown, /^### harnessbench: 2 fixtures on code 0123456\n/);
+  assert.match(markdown, /^\| Criterion \| Improved \| Regressed \| Unchanged \| n\/a \|$/m);
+  assert.match(markdown, /^\| Turns \| announcements, ttl-cache \|  \|  \|  \|$/m);
+  assert.match(markdown, /^\| Code quality \| ttl-cache \|  \|  \| announcements \|$/m);
+  assert.match(markdown, /<details><summary>announcements<\/summary>\n\n### harnessbench: `announcements`/);
+  assert.match(markdown, /<details><summary>ttl-cache<\/summary>\n\n### harnessbench: `ttl-cache`[\s\S]*\| Code quality \|  \|  \| candidate preferred \| improved \| B is tidier\. \|\n\n<\/details>\n?$/);
 });
 
 test("compare needs a repository with a config", () => {

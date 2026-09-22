@@ -30,10 +30,10 @@ These benchmarks cost real tokens to run. A degraded harness costs more, because
 1. **Fixtures** are realistic engineering tasks — a prompt and a one-line description, nothing more. Three ship with the tool; add your own under `.harnessbench/fixtures/`.
 2. **Environments** are two versions of the harness: `previous` (what's on `main`) and `candidate` (your branch). Code is identical in both; only the harness differs.
 3. A **setup command** from the config (`npm ci`, `go mod download`, detected from the lockfile) makes each disposable workspace ready before the agent's clock starts, so the first turns are not spent discovering that nothing is installed.
-4. An **agent adapter** runs each fixture in each environment inside a disposable workspace and records what happened: the diff, the transcript, tokens, cost, tool calls, time. The two environments run at the same time, each in its own workspace, so a fixture takes as long as its slower side; while they run, one progress line per event goes to stderr. Claude Code first; Codex, Aider, Gemini CLI, OpenCode and Pi to follow.
+4. An **agent adapter** runs each fixture in each environment inside a disposable workspace and records what happened: the diff, the transcript, tokens, cost, tool calls, time. Every side of every fixture in a run starts at once, each in its own workspace, so a batch takes as long as its slowest side (or as long as `--concurrency` allows); while they run, one progress line per event goes to stderr. Claude Code first; Codex, Aider, Gemini CLI, OpenCode and Pi to follow.
 5. A **thin mechanical layer** checks the hard facts: does your test suite still pass, how big is the diff, what did the agent spend (tokens, cost, time, tool calls).
 6. **AI judges** decide everything that can't be measured mechanically — code quality, engineering practice, test quality, and whatever criterion you write a rubric for — by comparing the `previous` and `candidate` results side by side as A and B, blind to which is which, one verdict per judge with the evidence that decided it.
-7. The report is a table of **deltas**, one row per criterion: `compare` turns the two runs into it, and `run` prints it as soon as both sides are in. Improvements and regressions are both visible, and a delta below the noise threshold is reported as unchanged rather than dressed up as signal. Nothing rolls the rows into a score.
+7. The report is a table of **deltas**, one row per criterion: `compare` turns the two runs into it, and `run` prints it as soon as both sides are in. Improvements and regressions are both visible, and a delta below the noise threshold is reported as unchanged rather than dressed up as signal. Over several fixtures a **roll-up** sits above the tables, one row per criterion saying which fixtures improved and which regressed, by name. Nothing rolls the rows into a score.
 
 Runs are content-addressed by fixture, base commit, harness hash, agent and model, so baseline runs are cached and a PR normally pays only for the candidate side.
 
@@ -86,13 +86,18 @@ The config it writes is small and meant to be edited by hand:
 
 Credentials are never stored in the config. harnessbench forwards the agent's own environment variables from your shell — `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` (a subscription token from `claude setup-token`), or the Bedrock and Vertex settings — and refuses to start when none of them is set. On a laptop, where the alternative is a key in your shell profile, put them in `.harnessbench/.env` instead: `init` gitignores it and writes a commented `.env.example` beside it listing the variables your agent and judge could use. Every command reads the file into its environment before checking anything, one `KEY=value` per line (comments, blank lines and quoted values as in any env file); a variable already set in your shell wins over the file, so CI is unaffected. The file's values are never logged or printed, and a line the parser cannot read is reported by number only. The agent runs in a disposable clone of your repository with its own `HOME` and its own config directory, so your `~/.claude` is neither read nor written, and nothing it does can reach the original repository.
 
-Then run a fixture:
+Then run the fixtures:
 
 ```sh
-npx harnessbench run ttl-cache
+npx harnessbench run                                  # every fixture in .harnessbench/fixtures
+npx harnessbench run ttl-cache                        # one fixture
+npx harnessbench run --tag http --tag performance     # the fixtures carrying either tag
+npx harnessbench run ttl-cache announcements --tag performance --concurrency 2
 ```
 
-`run` drives the fixture twice on the same code, the current `HEAD`: once as `previous`, with the harness files as they were committed at the merge base of your branch and the base branch, and once as `candidate`, with the harness at `HEAD`. Each side gets a disposable shallow clone (for `previous`, the merge-base harness is overlaid on top and folded into the clone's single commit, so the agent sees an ordinary checkout), the setup command installs its dependencies (its output goes to `setup.log`; a setup that fails or times out stops the run with exit 1 and no `run.json` for that side, because a tree that cannot install is a configuration problem, not a result), the fixture's prompt is handed to the agent there, the diff is captured, your test command runs against the result, and everything lands in `.harnessbench/runs/<timestamp>-<fixture>-<environment>/`: the agent's raw output stream, a normalised `transcript.jsonl`, `diff.patch`, `setup.log`, `test.log`, `agent.stderr.log` and a `run.json` with the outcome, setup and test results, a hash of the harness that ran, and the telemetry: what the agent reported for the whole run (tokens, cost, turns, tool calls by name) plus what the transcript says about how it worked, derived once from `transcript.jsonl` so every adapter gets it for free: turns, calls, failures and tokens per thread (the main conversation and each sub-agent, with the model it ran on), reads and turns before the first edit, distinct files read and written, repeat reads (the main thread re-reading a file) and duplicate reads (the main thread reading what a sub-agent already had), and the wall clock split into exploring (start to first write), building (first to last write) and verifying (last write to the end). Each transcript event carries its thread and its arrival time in milliseconds since the agent started, and each tool call its adapter-neutral kind (read, write, search, shell, spawn, other) and the file it touched, relative to the workspace. It then prints one summary per side:
+With no ids and no `--tag`, `run` takes every fixture; ids name fixtures; `--tag` picks those whose `fixture.json` carries the tag (repeat it for several, any one matches); ids and tags together select the intersection, and an empty selection is an error that lists the fixtures and tags that exist. Every side of every selected fixture starts together, under one stamp, so three fixtures cost the wall clock of the slowest side; `--concurrency <n>` caps how many sides are in flight when the machine or the rate limit cannot take them all at once. Before anything starts, one stderr line says how much is about to happen: `running 3 fixtures × 2 sides = 6 runs: announcements, holiday-api-client, ttl-cache`.
+
+For each fixture, `run` drives the agent twice on the same code, the current `HEAD`: once as `previous`, with the harness files as they were committed at the merge base of your branch and the base branch, and once as `candidate`, with the harness at `HEAD`. Each side gets a disposable shallow clone (for `previous`, the merge-base harness is overlaid on top and folded into the clone's single commit, so the agent sees an ordinary checkout), the setup command installs its dependencies (its output goes to `setup.log`; a setup that fails or times out stops the run with exit 1 and no `run.json` for that side, because a tree that cannot install is a configuration problem, not a result), the fixture's prompt is handed to the agent there, the diff is captured, your test command runs against the result, and everything lands in `.harnessbench/runs/<timestamp>-<fixture>-<environment>/`: the agent's raw output stream, a normalised `transcript.jsonl`, `diff.patch`, `setup.log`, `test.log`, `agent.stderr.log` and a `run.json` with the outcome, setup and test results, a hash of the harness that ran, and the telemetry: what the agent reported for the whole run (tokens, cost, turns, tool calls by name) plus what the transcript says about how it worked, derived once from `transcript.jsonl` so every adapter gets it for free: turns, calls, failures and tokens per thread (the main conversation and each sub-agent, with the model it ran on), reads and turns before the first edit, distinct files read and written, repeat reads (the main thread re-reading a file) and duplicate reads (the main thread reading what a sub-agent already had), and the wall clock split into exploring (start to first write), building (first to last write) and verifying (last write to the end). Each transcript event carries its thread and its arrival time in milliseconds since the agent started, and each tool call its adapter-neutral kind (read, write, search, shell, spawn, other) and the file it touched, relative to the workspace. It then prints one summary per side:
 
 ```
 harnessbench run  ttl-cache · previous  → completed in 3m48s
@@ -119,7 +124,7 @@ Run dir    .harnessbench/runs/20260919-031455-ttl-cache-candidate
 Final message: Added a TTL cache and wired it into the expensive read.
 ```
 
-After the two summaries comes the comparison, the same table `compare` prints:
+(Over several fixtures, every progress line also carries the fixture: `[05:01] ttl-cache  previous   agent completed (30 turns)`.) After the two summaries comes the comparison, the same table `compare` prints:
 
 ```
 harnessbench compare  ttl-cache · code 0655c52
@@ -164,25 +169,54 @@ One row per criterion, lower is better for every count except `Sub-agents`, whic
 
 The rows under `judged by` are the judges' verdicts (see [Judges](#judges)), one row per judge named in the config's `judges` list, in that order: the delta column holds `candidate preferred`, `previous preferred` or `tie`, the result column maps that to `improved`, `regressed` or `unchanged`, and the note is the judge's reason. The table never hides drift between the config and the verdicts on disk: a judge that has not been run reads `not judged` with the command to run; a verdict produced under a rubric that has since been edited keeps its verdict and says `rubric changed since this verdict`; a verdict for a judge removed from the config stays, after the configured ones, marked `no longer in config.judges`. With no judges configured there are no judge rows. `compare` never calls a model; it only reads what `judge` wrote.
 
-When both hashes are equal the harness did not change between the merge base and `HEAD`, and `run` says so before it starts: any difference between the two sides is then noise. `--json` prints both `run.json` records and the comparison as one array, `--keep` leaves both workspaces on disk and prints their paths, and `--max-turns` and `--model` override the config for one run. The exit code reports the agent, not your tests: 0 when both sides completed, 2 when either timed out, 3 when either failed, 4 when either hit the turn limit, 1 for anything wrong with the setup, 130 when you interrupted it. A failing test suite is a result, recorded in `run.json`, not an error. Ctrl-C (or `SIGTERM`) kills both agents, which run detached and would otherwise keep going, removes both workspaces unless `--keep`, and exits 130; an interrupted run leaves its run directories with whatever was written so far (`raw.jsonl`, `setup.log`) and no `run.json`, which `compare` reports as unreadable.
+When both hashes are equal the harness did not change between the merge base and `HEAD`, and `run` says so before it starts: any difference between the two sides is then noise. `--json` prints one object for the batch, `{ stamp, fixtures: [{ fixture, records, comparison, error }], rollup }`, whatever the number of fixtures; `--keep` leaves every workspace on disk and prints their paths, and `--max-turns` and `--model` override the config for one run. The exit code reports the agent, not your tests: 0 when every side completed, 2 when any timed out, 3 when any failed, 4 when any hit the turn limit, 1 for anything wrong with the setup, 130 when you interrupted it. A failing test suite is a result, recorded in `run.json`, not an error. A side whose setup fails never stops the others: every other fixture still runs and is reported, the failed fixture shows the error (and the surviving side's record path) in its place, and the command ends with one error listing every failed fixture and side. Ctrl-C (or `SIGTERM`) kills every agent, which run detached and would otherwise keep going, removes their workspaces unless `--keep`, and exits 130; an interrupted run leaves its run directories with whatever was written so far (`raw.jsonl`, `setup.log`) and no `run.json`, which `compare` reports as unreadable.
 
-To see the table again later, or for a pair of runs you name:
+### Running a set
+
+A harness change that helps one fixture and hurts three is exactly what the tool exists to catch, so with several fixtures the output opens with a roll-up, then each fixture's two summaries and table under a `── <fixture> ──` line:
+
+```
+harnessbench rollup  3 fixtures · code 0655c52
+
+one run per side per fixture; counts are fixtures, names in brackets
+
+Outcome                  unchanged 3 [announcements, holiday-api-client, ttl-cache]
+Tests                    unchanged 3 [announcements, holiday-api-client, ttl-cache]
+Turns                    improved 2 [holiday-api-client, ttl-cache]   regressed 1 [announcements]
+Reads before first edit  improved 3 [announcements, holiday-api-client, ttl-cache]
+Cost                     unchanged 2 [holiday-api-client, ttl-cache]   n/a 1 [announcements]
+Code quality             candidate 1 [ttl-cache]   previous 1 [holiday-api-client]   tie 1 [announcements]
+Test quality             tie 2 [holiday-api-client, ttl-cache]   n/a 1 [announcements]
+
+── announcements ──
+
+harnessbench run  announcements · previous  → completed in 3m48s
+...
+```
+
+One row per criterion that appears in any fixture's table, in the table's order; each classification that applies is shown with its count and, always, the fixtures behind it, so a `regressed 1` never has to be looked up. Mechanical rows use `improved` / `regressed` / `unchanged`, judge rows `candidate` / `previous` / `tie`; `n/a` appears only when some fixture has it. Warnings from every fixture's table are repeated under the roll-up's noise line, each prefixed with its fixture. There is no composite and no row that sums across criteria: the roll-up is the tables read across, not a score.
+
+To see the tables again later:
 
 ```sh
-npx harnessbench compare --fixture ttl-cache                      # the latest run of the fixture
+npx harnessbench compare                                          # the latest run that has a complete pair
+npx harnessbench compare --stamp 20260922-101500                  # the run with that stamp
+npx harnessbench compare --fixture ttl-cache                      # the latest pair of one fixture
 npx harnessbench compare <previous-run-id> <candidate-run-id>     # any pair, in either order
 ```
 
-`compare` refuses a pair that is not one `previous` and one `candidate` of the same fixture on the same `HEAD`, and says which check failed. `--markdown` prints the same table, judge rows included, as GitHub-flavoured markdown, ready to be a PR comment, with `Judged by <provider> <model>.` as a sentence above it and each reason whole in its note cell; `--json` prints the comparison object, whose judge rows have ids `judge.<judge-id>` and whose `judged` field names the model. It always exits 0 after printing: it reports, it does not gate.
+A run is identified by its stamp, the `YYYYMMDD-HHMMSS` prefix every run directory of one invocation shares; nothing else is written to name it. With no arguments `compare` takes the newest stamp that has at least one complete previous/candidate pair and prints the roll-up and the tables; a fixture whose side is missing or unreadable (interrupted, or setup failed) is listed under its heading with the reason instead of a table, and a stamp with no complete pair at all is refused with what is missing. `--fixture` and two run ids address one pair, as before, and print its table alone. `compare` refuses a pair that is not one `previous` and one `candidate` of the same fixture on the same `HEAD`, and says which check failed. `--markdown` prints the same as GitHub-flavoured markdown, ready to be a PR comment: for a pair, the table with `Judged by <provider> <model>.` as a sentence above it and each reason whole in its note cell; for a run, the roll-up as a table (criterion, improved, regressed, unchanged, n/a, fixture names in the cells) and then each fixture's table folded into a `<details>` block. `--json` prints the comparison object for a pair (judge rows have ids `judge.<judge-id>`, `judged` names the model) or `{ stamp, fixtures: [{ fixture, comparison, error }], rollup }` for a run. It always exits 0 after printing: it reports, it does not gate.
 
 ## Judges
 
 The table says what each side cost and whether the tests pass. It cannot say whether the code the candidate harness produced is better than the code the previous one produced. A judge can: it reads both sides' work and says which it prefers on one criterion, with a reason.
 
 ```sh
+npx harnessbench judge                                            # every complete pair of the latest run
+npx harnessbench judge --stamp 20260922-101500                    # every complete pair of that run
 npx harnessbench judge --fixture ttl-cache                        # the latest run pair of the fixture
 npx harnessbench judge <previous-run-id> <candidate-run-id>       # any pair, in either order
-npx harnessbench run ttl-cache --judge                            # run both sides, then judge them
+npx harnessbench run --judge                                      # run every fixture, judging each as its sides finish
 ```
 
 ```
@@ -199,7 +233,7 @@ harnessbench compare  ttl-cache · code 0655c52
 ...
 ```
 
-The verdicts are rows of the comparison table, which `judge` prints after the lines above (see the example under [Getting started](#getting-started)); `run --judge` prints only the table. Judging is incremental: a judge whose verdict on this pair already exists, produced under the rubric as it is now, is kept without a model call and reads `kept (rubric unchanged)`; the rest are judged. `--all` judges every configured judge again, and `run --judge` always does, since its pair is new.
+The verdicts are rows of the comparison table, which `judge` prints after the lines above (see the example under [Getting started](#getting-started)); `run --judge` prints only the table. Judging is incremental: a judge whose verdict on this pair already exists, produced under the rubric as it is now, is kept without a model call and reads `kept (rubric unchanged)`; the rest are judged. `--all` judges every configured judge again, and `run --judge` always does, since its pair is new. `judge` addresses runs as `compare` does: with no arguments or `--stamp`, every complete pair of the run is judged, the pairs concurrently (the judges within a pair still in order), and the output is the roll-up plus each fixture's judging lines and table; a pair with a missing side, or one a judge refuses (a side that did not complete, say), is listed as skipped with the reason and does not stop the others. If every pair was refused, nothing was judged and the command refuses with all the reasons. `run --judge` judges each fixture's pair the moment its two sides are in, while the other fixtures are still running; a refusal for one fixture is one `<fixture>: judging skipped: …` line on stderr.
 
 Judges are a catalogue, like fixtures. Three ship with the tool and `init` copies them into `.harnessbench/judges/`, one directory per judge, skipping any id you already have: `code-quality` (the diff, read as a reviewer would), `engineering-practices` (the diff and the tool log: scope, verification, method) and `test-quality` (the diff and the test result: whether the tests would fail if the feature broke). Their rubrics are drafts, and each `prompt.md` says so in its first line; edit them to fit your codebase.
 
@@ -229,7 +263,7 @@ Requires Node.js 20.12 or later (the first release with `util.parseEnv`, which r
 
 ## Status
 
-Early. `init`, `run`, `compare` and `judge` work, three fixtures and three draft judges ship, and the Claude Code adapter is written and tested. `run` produces the `previous` and `candidate` sides of one fixture, `compare` reports the mechanical deltas between them, and `judge` gives one blind pairwise verdict per configured judge, incrementally, as rows of the same table. The rough order of what comes next:
+Early. `init`, `run`, `compare` and `judge` work, three fixtures and three draft judges ship, and the Claude Code adapter is written and tested. `run` produces the `previous` and `candidate` sides of a set of fixtures at once, `compare` reports the mechanical deltas per fixture with a roll-up across them, and `judge` gives one blind pairwise verdict per configured judge per pair, incrementally, as rows of the same tables. The rough order of what comes next:
 
 1. A position-swapped second judge call as an opt-in
 2. A GitHub Action that comments the markdown table on PRs touching harness files

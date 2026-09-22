@@ -27,8 +27,8 @@ import { packagedJudgesDir, requireJudge } from "../judges.js";
 import type { Comparison } from "../compare.js";
 import type { ResolvedJudge } from "../preflight.js";
 import { readRunRecord, writeRunRecord, type Environment, type RunRecord } from "../run-record.js";
-import { judge, type JudgeDeps, type JudgeRecord } from "./judge.js";
-import { run } from "./run.js";
+import { judge, judgeBatch, type JudgeDeps, type JudgeRecord } from "./judge.js";
+import { run, type RunBatchResult } from "./run.js";
 
 /**
  * No model is ever called here. Refusals happen before any call, so they run through the CLI;
@@ -305,10 +305,11 @@ test("judge refuses an unknown judge id in the config, an empty list, and a run 
   assert.match(refuses(bare, p, c).stderr, new RegExp(`run '${c}' has no diff.patch`));
 });
 
-test("judge needs two ids or --fixture, and a repository with a config", () => {
+test("judge takes two ids or none, refuses a bare call with nothing to judge, and needs a repository with a config", () => {
   const root = repo();
+  // Bare judge addresses the latest batch; with no runs there is none, and no model is reached.
+  assert.match(refuses(root).stderr, /no runs in \.harnessbench\/runs - run `harnessbench run` first/);
   const [previous] = writePair(root, "20260919-100000");
-  assert.equal(refuses(root).status, 2);
   assert.match(refuses(root, previous).stderr, /judge takes two run ids or none/);
   assert.match(refuses(root, "--fixture", "announcements").stderr, /no previous\/candidate run pair for fixture 'announcements'/);
 
@@ -664,6 +665,102 @@ test("with --fixture, judge picks the latest pair and ignores -judge directories
   assert.deepEqual(judgeDirs(root), ["20260919-100000-ttl-cache-judge", "20260920-100000-ttl-cache-judge"]);
 });
 
+// --- batches ---
+
+/** A mock judge whose every call records when it started and takes `delayMs` before replying. */
+function slowMocks(delayMs: number, replyFor: (call: number) => Reply): JudgeDeps & { starts: number[] } {
+  const starts: number[] = [];
+  return {
+    starts,
+    judgeFor() {
+      const model = new MockLanguageModelV4({
+        doGenerate: async () => {
+          const call = starts.push(Date.now());
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          return replyFor(call);
+        },
+      });
+      return modelJudge(model);
+    },
+  };
+}
+
+test("judge over a batch judges every complete pair at once, skips an incomplete one with the reason, and prints the roll-up", async () => {
+  const root = repo({}, ["code-quality"]);
+  mkdirSync(join(root, FIXTURES_DIR, "announcements"), { recursive: true });
+  writeFileSync(join(root, FIXTURES_DIR, "announcements", "fixture.json"), '{"id":"announcements","kind":"feature","description":"d"}\n', "utf8");
+  writeFileSync(join(root, FIXTURES_DIR, "announcements", "prompt.md"), "Announce.\n", "utf8");
+  const stamp = "20260922-100000";
+  writePair(root, stamp, {}, "announcements");
+  writePair(root, stamp, {}, "ttl-cache");
+  write(root, stamp, "previous", {}, "holiday-api-client"); // No candidate side.
+  writePair(root, "20260921-100000"); // An older batch, not this one.
+  const deps = slowMocks(300, (call) => verdict(call === 1 ? "B" : "A", `verdict ${call}`));
+
+  const began = Date.now();
+  const { result, stdout } = await captured(() => judgeBatch({ cwd: root, json: false, all: false }, deps));
+  const took = Date.now() - began;
+
+  // Two pairs, one judge each, 300 ms per call: in series that is 600 ms. They overlapped.
+  assert.equal(deps.starts.length, 2);
+  assert.ok(took < 550, `judging took ${took}ms`);
+  assert.ok(Math.abs((deps.starts[1] as number) - (deps.starts[0] as number)) < 200, `starts ${deps.starts.join(", ")}`);
+
+  assert.equal(result.stamp, stamp);
+  assert.deepEqual(result.fixtures.map((each) => [each.fixture, each.comparison !== null, each.judging !== null]), [
+    ["announcements", true, true],
+    ["holiday-api-client", false, false],
+    ["ttl-cache", true, true],
+  ]);
+  assert.equal(result.fixtures[1]?.error, "holiday-api-client: candidate side missing");
+  assert.deepEqual(judgeDirs(root), [`${stamp}-announcements-judge`, `${stamp}-ttl-cache-judge`]);
+  const judged = result.rollup.rows.find((row) => row.id === "judge.code-quality");
+  assert.equal(judged?.improved.length, 1);
+  assert.equal(judged?.regressed.length, 1);
+  assert.deepEqual([...(judged?.improved ?? []), ...(judged?.regressed ?? [])].sort(), ["announcements", "ttl-cache"]);
+
+  assert.match(stdout, /^harnessbench rollup {2}2 fixtures · code 0123456\n/);
+  assert.match(stdout, /^── announcements ──\n\nharnessbench judge {2}announcements/m);
+  assert.match(stdout, /^── holiday-api-client ──\n\nerror: holiday-api-client: candidate side missing$/m);
+  assert.match(stdout, /^── ttl-cache ──\n\nharnessbench judge {2}ttl-cache/m);
+});
+
+test("judge over a batch reports a pair a judge refuses as skipped, judges the rest, and refuses a batch with no complete pair", async () => {
+  const root = repo({}, ["code-quality"]);
+  const stamp = "20260922-100000";
+  writePair(root, stamp, { candidate: { record: { outcome: "max_turns" } } }, "ttl-cache");
+  mkdirSync(join(root, FIXTURES_DIR, "announcements"), { recursive: true });
+  writeFileSync(join(root, FIXTURES_DIR, "announcements", "fixture.json"), '{"id":"announcements","kind":"feature","description":"d"}\n', "utf8");
+  writeFileSync(join(root, FIXTURES_DIR, "announcements", "prompt.md"), "Announce.\n", "utf8");
+  writePair(root, stamp, {}, "announcements");
+  const deps = mocks([verdict("tie", "same")]);
+
+  const { result, stdout } = await captured(() => judgeBatch({ cwd: root, stamp, json: true, all: false }, deps));
+
+  assert.equal(deps.targets.length, 1);
+  assert.equal(result.fixtures[0]?.judging?.judged.length, 1);
+  assert.equal(result.fixtures[1]?.judging, null);
+  assert.match(result.fixtures[1]?.error ?? "", /^judging skipped: candidate did not complete \(max_turns\)/);
+  assert.notEqual(result.fixtures[1]?.comparison, null, "the table is still printed for a pair that cannot be judged");
+  assert.deepEqual(judgeDirs(root), [`${stamp}-announcements-judge`]);
+  assert.equal((JSON.parse(stdout) as typeof result).stamp, stamp);
+
+  // Every complete pair refused: nothing was judged, so the command refuses as a single pair would.
+  const allRefused = repo({}, ["code-quality"]);
+  writePair(allRefused, stamp, { previous: { record: { outcome: "timeout" } } });
+  await assert.rejects(
+    captured(() => judgeBatch({ cwd: allRefused, json: false, all: false }, mocks())),
+    (error: unknown) => error instanceof CliError && /^ttl-cache: previous did not complete \(timeout\)/.test(error.message),
+  );
+  assert.deepEqual(judgeDirs(allRefused), []);
+
+  const empty = repo({}, ["code-quality"]);
+  write(empty, stamp, "previous");
+  assert.match(cli(empty, ENV, "judge", "--stamp", stamp).stderr, /batch 20260922-100000 has no complete previous\/candidate pair:\n\s+ttl-cache: candidate side missing/);
+  assert.match(cli(empty, ENV, "judge").stderr, /no complete previous\/candidate pair in \.harnessbench\/runs/);
+  assert.match(cli(empty, ENV, "judge", "--stamp", stamp, "--fixture", "ttl-cache").stderr, /--fixture and --stamp are exclusive/);
+});
+
 // --- run --judge ---
 
 /** A fake agent or a recorded stream, from test/fixtures. */
@@ -694,7 +791,7 @@ function repoWithFakeAgent(judgePatch: Partial<Config["judge"]> = {}): string {
 }
 
 // Fixtures other than ttl-cache: test files run in parallel, and run ids share $TMPDIR by the second.
-const RUN_OPTIONS = { keep: false, json: false, judge: true };
+const RUN_OPTIONS = { tags: [], keep: false, json: false, judge: true };
 
 test("run --judge judges the pair it just produced, after the comparison", async () => {
   // What the fake agent replays and needs; forwarded through config.agent.env.
@@ -704,10 +801,11 @@ test("run --judge judges the pair it just produced, after the comparison", async
   const root = repoWithFakeAgent();
   const deps = mocks([verdict("B", "B's cache has a size limit.")], [verdict("tie", "Neither side added tests.")]);
 
-  const { result: records, stdout, stderr } = await captured(() =>
-    run({ cwd: root, fixtureId: "announcements", ...RUN_OPTIONS }, deps),
+  const { result, stdout, stderr } = await captured(() =>
+    run({ cwd: root, fixtureIds: ["announcements"], ...RUN_OPTIONS }, deps),
   );
 
+  const records = result.fixtures[0]?.records ?? [];
   assert.equal(records.length, 2);
   const [previous, candidate] = records as [RunRecord, RunRecord];
   const dirs = judgeDirs(root);
@@ -744,20 +842,24 @@ test("run --judge on a refusal says judging was skipped and why, and the run is 
   const root = repoWithFakeAgent({ model: "" });
   const deps = mocks([verdict("B", "never asked")]);
 
-  const { result: records, stdout, stderr } = await captured(() =>
-    run({ cwd: root, fixtureId: "holiday-api-client", ...RUN_OPTIONS, json: true }, deps),
+  const { result, stdout, stderr } = await captured(() =>
+    run({ cwd: root, fixtureIds: ["holiday-api-client"], ...RUN_OPTIONS, json: true }, deps),
   );
 
-  assert.equal(records.length, 2);
+  assert.equal(result.fixtures[0]?.records.length, 2);
   assert.deepEqual(judgeDirs(root), []);
   assert.equal(deps.targets.length, 0);
-  assert.match(stderr, /^judging skipped: judge 'code-quality' has no model: set "judge\.model"/m);
-  // --json still prints both records and the comparison, nothing more; the table says the judges did not run.
-  const printed = JSON.parse(stdout) as [RunRecord, RunRecord, Comparison];
-  assert.equal(printed.length, 3);
-  assert.equal(printed[2].judged, null);
+  assert.match(stderr, /^holiday-api-client: judging skipped: judge 'code-quality' has no model: set "judge\.model"/m);
+  // --json still prints the records and the comparison, no error for the fixture; the table says the judges did not run.
+  const printed = JSON.parse(stdout) as RunBatchResult;
+  const only = printed.fixtures[0] as RunBatchResult["fixtures"][number];
+  assert.equal(printed.fixtures.length, 1);
+  assert.equal(only.records.length, 2);
+  assert.equal(only.error, null);
+  const comparison = only.comparison as Comparison;
+  assert.equal(comparison.judged, null);
   assert.deepEqual(
-    printed[2].rows.filter((row) => row.id.startsWith("judge.")).map((row) => [row.id, row.note]),
+    comparison.rows.filter((row) => row.id.startsWith("judge.")).map((row) => [row.id, row.note]),
     [
       ["judge.code-quality", "not judged; run harnessbench judge --fixture holiday-api-client"],
       ["judge.test-quality", "not judged; run harnessbench judge --fixture holiday-api-client"],

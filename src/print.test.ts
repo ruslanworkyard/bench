@@ -2,7 +2,18 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import type { Comparison, Row } from "./compare.js";
-import { NOISE_LINE, formatComparison, formatComparisonMarkdown, formatProgress, formatRun } from "./print.js";
+import type { Rollup } from "./compare.js";
+import {
+  NOISE_LINE,
+  ROLLUP_LINE,
+  formatBatch,
+  formatBatchMarkdown,
+  formatComparison,
+  formatComparisonMarkdown,
+  formatProgress,
+  formatRollup,
+  formatRun,
+} from "./print.js";
 import type { RunRecord } from "./run-record.js";
 
 function row(patch: Partial<Row> & { id: string; label: string }): Row {
@@ -234,31 +245,126 @@ test("formatComparisonMarkdown puts the judge rows in the same table with the wh
   assert.doesNotMatch(formatComparisonMarkdown(comparison()), /[Jj]udge/);
 });
 
-test("formatProgress puts one clock and one aligned environment column before every event", () => {
+test("formatProgress puts one clock, an aligned fixture column and an aligned environment column before every event", () => {
   const ok = { command: "npm ci", exitCode: 0, durationMs: 800, timedOut: false };
   const failed = { command: "npm test", exitCode: 1, durationMs: 18_400, timedOut: false };
+  const width = "holiday-api-client".length;
   const lines = [
-    formatProgress(0, "previous", { kind: "started" }),
-    formatProgress(1_200, "candidate", { kind: "setup", result: ok }),
-    formatProgress(1_200, "candidate", { kind: "setup", result: { ...failed, command: "npm ci" } }),
-    formatProgress(301_000, "previous", { kind: "agent", outcome: "completed", turns: 30 }),
-    formatProgress(346_000, "candidate", { kind: "agent", outcome: "max_turns", turns: 1 }),
-    formatProgress(319_000, "previous", { kind: "tests", result: { ...ok, command: "npm test", durationMs: 18_000 } }),
-    formatProgress(319_000, "previous", { kind: "tests", result: failed }),
-    formatProgress(319_000, "previous", { kind: "tests", result: { ...failed, exitCode: null, timedOut: true } }),
-    formatProgress(319_000, "previous", { kind: "tests", result: null }),
-    formatProgress(3_600_000, "previous", { kind: "recorded", runId: "20260922-101500-ttl-cache-previous" }),
+    formatProgress(0, "ttl-cache", width, "previous", { kind: "started" }),
+    formatProgress(1_200, "holiday-api-client", width, "candidate", { kind: "setup", result: ok }),
+    formatProgress(1_200, "ttl-cache", width, "candidate", { kind: "setup", result: { ...failed, command: "npm ci" } }),
+    formatProgress(301_000, "ttl-cache", width, "previous", { kind: "agent", outcome: "completed", turns: 30 }),
+    formatProgress(346_000, "ttl-cache", width, "candidate", { kind: "agent", outcome: "max_turns", turns: 1 }),
+    formatProgress(319_000, "ttl-cache", width, "previous", { kind: "tests", result: { ...ok, command: "npm test", durationMs: 18_000 } }),
+    formatProgress(319_000, "ttl-cache", width, "previous", { kind: "tests", result: failed }),
+    formatProgress(319_000, "ttl-cache", width, "previous", { kind: "tests", result: { ...failed, exitCode: null, timedOut: true } }),
+    formatProgress(319_000, "ttl-cache", width, "previous", { kind: "tests", result: null }),
+    formatProgress(3_600_000, "ttl-cache", width, "previous", { kind: "recorded", runId: "20260922-101500-ttl-cache-previous" }),
   ];
   assert.deepEqual(lines, [
-    "[00:00] previous   started",
-    "[00:01] candidate  setup ok (npm ci, 0.8s)",
-    "[00:01] candidate  setup failed (npm ci, exit 1, 18s)",
-    "[05:01] previous   agent completed (30 turns)",
-    "[05:46] candidate  agent max_turns (1 turn)",
-    "[05:19] previous   tests passed (18s)",
-    "[05:19] previous   tests failed (exit 1, 18s)",
-    "[05:19] previous   tests failed (timed out, 18s)",
-    "[05:19] previous   tests not configured",
-    "[60:00] previous   recorded .harnessbench/runs/20260922-101500-ttl-cache-previous",
+    "[00:00] ttl-cache           previous   started",
+    "[00:01] holiday-api-client  candidate  setup ok (npm ci, 0.8s)",
+    "[00:01] ttl-cache           candidate  setup failed (npm ci, exit 1, 18s)",
+    "[05:01] ttl-cache           previous   agent completed (30 turns)",
+    "[05:46] ttl-cache           candidate  agent max_turns (1 turn)",
+    "[05:19] ttl-cache           previous   tests passed (18s)",
+    "[05:19] ttl-cache           previous   tests failed (exit 1, 18s)",
+    "[05:19] ttl-cache           previous   tests failed (timed out, 18s)",
+    "[05:19] ttl-cache           previous   tests not configured",
+    "[60:00] ttl-cache           previous   recorded .harnessbench/runs/20260922-101500-ttl-cache-previous",
   ]);
+  // One fixture: the column is as wide as its id.
+  assert.equal(formatProgress(0, "ttl-cache", 9, "previous", { kind: "started" }), "[00:00] ttl-cache  previous   started");
+});
+
+// --- roll-up ---
+
+function rollupOf(): Rollup {
+  return {
+    fixtures: 3,
+    rows: [
+      { id: "turns", label: "Turns", improved: ["list-runs", "ttl-cache"], regressed: ["announcements"], unchanged: [], na: [] },
+      { id: "readsBeforeFirstEdit", label: "Reads before first edit", improved: ["list-runs", "ttl-cache", "announcements"], regressed: [], unchanged: [], na: [] },
+      { id: "costUsd", label: "Cost", improved: [], regressed: [], unchanged: ["list-runs"], na: ["ttl-cache", "announcements"] },
+      { id: "judge.code-quality", label: "Code quality", improved: ["ttl-cache"], regressed: ["list-runs"], unchanged: ["announcements"], na: [] },
+    ],
+    warnings: [],
+  };
+}
+
+const SHA = "0123456789abcdef0123456789abcdef01234567";
+
+test("formatRollup aligns the criterion column and lists each fixture behind every count", () => {
+  const lines = formatRollup(rollupOf(), SHA).split("\n");
+
+  assert.deepEqual(lines.slice(0, 4), ["harnessbench rollup  3 fixtures · code 0123456", "", ROLLUP_LINE, ""]);
+  assert.deepEqual(lines.slice(4), [
+    "Turns                    improved 2 [list-runs, ttl-cache]   regressed 1 [announcements]",
+    "Reads before first edit  improved 3 [list-runs, ttl-cache, announcements]",
+    "Cost                     unchanged 1 [list-runs]   n/a 2 [ttl-cache, announcements]",
+    "Code quality             candidate 1 [ttl-cache]   previous 1 [list-runs]   tie 1 [announcements]",
+  ]);
+  // Every first cell starts in the same column: the widest label plus two spaces.
+  const cellAt = lines.slice(4).map((line) => line.search(/ {2}\S/) + 2);
+  assert.equal(new Set(cellAt).size, 1, `cells at ${cellAt.join(", ")}`);
+  assert.equal(cellAt[0], "Reads before first edit".length + 2);
+});
+
+test("formatRollup prints warnings under the noise line, and formatBatch puts the roll-up above each fixture's blocks", () => {
+  const withWarnings = { ...rollupOf(), warnings: ["ttl-cache: models differ", "announcements: same harness"] };
+  const lines = formatRollup(withWarnings, SHA).split("\n");
+  const at = lines.indexOf(ROLLUP_LINE);
+  assert.equal(lines[at + 1], "warning: ttl-cache: models differ");
+  assert.equal(lines[at + 2], "warning: announcements: same harness");
+  assert.equal(lines[at + 3], "");
+
+  const text = formatBatch(
+    rollupOf(),
+    [
+      { fixture: "ttl-cache", comparison: comparison(), error: null },
+      { fixture: "holiday-api-client", comparison: null, error: "holiday-api-client: candidate side missing" },
+    ],
+    SHA,
+  );
+  assert.match(text, /^harnessbench rollup {2}3 fixtures/);
+  assert.match(text, /\n\n── ttl-cache ──\n\nharnessbench compare {2}ttl-cache · code 0123456\n/);
+  assert.match(text, /\n\n── holiday-api-client ──\n\nerror: holiday-api-client: candidate side missing$/);
+
+  // One fixture: its blocks alone, no roll-up, no heading.
+  const single = formatBatch(rollupOf(), [{ fixture: "ttl-cache", comparison: comparison(), error: null }], SHA);
+  assert.equal(single, formatComparison(comparison()));
+});
+
+test("formatBatchMarkdown renders the roll-up as a table of fixture names, then each fixture's table inside <details>", () => {
+  const text = formatBatchMarkdown(
+    { ...rollupOf(), warnings: ["ttl-cache: models | differ"] },
+    [
+      { fixture: "ttl-cache", comparison: comparison(), error: null },
+      { fixture: "holiday-api-client", comparison: null, error: "holiday-api-client: candidate side missing" },
+    ],
+    SHA,
+  );
+  const lines = text.split("\n");
+
+  assert.equal(lines[0], "### harnessbench: 3 fixtures on code 0123456");
+  assert.ok(lines.includes(`_${ROLLUP_LINE}_`));
+  assert.ok(lines.includes("> **warning:** ttl-cache: models \\| differ"));
+  const header = lines.indexOf("| Criterion | Improved | Regressed | Unchanged | n/a |");
+  assert.notEqual(header, -1);
+  assert.equal(lines[header + 1], "|---|---|---|---|---|");
+  assert.equal(lines[header + 2], "| Turns | list-runs, ttl-cache | announcements |  |  |");
+  assert.equal(lines[header + 4], "| Cost |  |  | list-runs | ttl-cache, announcements |");
+  assert.equal(lines[header + 5], "| Code quality | ttl-cache | list-runs | announcements |  |");
+
+  const details = lines.map((line, i) => [line, i] as const).filter(([line]) => line.startsWith("<details>"));
+  assert.deepEqual(details.map(([line]) => line), ["<details><summary>ttl-cache</summary>", "<details><summary>holiday-api-client</summary>"]);
+  const [first, second] = details.map(([, i]) => i) as [number, number];
+  // A blank line on each side of the table, so GitHub renders markdown inside the block.
+  assert.equal(lines[first - 1], "");
+  assert.equal(lines[first + 1], "");
+  assert.equal(lines[first + 2], "### harnessbench: `ttl-cache`");
+  assert.equal(lines[second + 2], "> **error:** holiday-api-client: candidate side missing");
+  assert.equal(lines.filter((line) => line === "</details>").length, 2);
+  assert.equal(lines.at(-1), "</details>");
+  assert.equal(lines.at(-2), "");
 });

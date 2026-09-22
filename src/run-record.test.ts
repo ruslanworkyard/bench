@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
 import { CliError } from "./errors.js";
-import { readRunRecord, writeRunRecord, type RunRecord } from "./run-record.js";
+import { latestBatch, listBatches, readRunRecord, writeRunRecord, type Environment, type RunRecord } from "./run-record.js";
 
 const dirs: string[] = [];
 
@@ -111,4 +111,80 @@ test("readRunRecord names a run.json that is not there", () => {
     () => readRunRecord(dir),
     (error: unknown) => error instanceof CliError && /no run\.json in/.test(error.message),
   );
+});
+
+// --- batches ---
+
+/** Writes a run directory named by `run`'s convention, with a record unless `body` says otherwise. */
+function side(runsDir: string, stamp: string, fixture: string, environment: Environment, body?: string): string {
+  const id = `${stamp}-${fixture}-${environment}`;
+  const dir = join(runsDir, id);
+  mkdirSync(dir, { recursive: true });
+  if (body === undefined) writeRunRecord(dir, { ...record(), runId: id, fixture, environment });
+  else if (body !== "") writeFileSync(join(dir, "run.json"), body, "utf8");
+  return id;
+}
+
+test("listBatches groups run directories by stamp, newest first, pairs by fixture in id order", () => {
+  const runsDir = join(tempDir(), "runs");
+  side(runsDir, "20260920-100000", "ttl-cache", "previous");
+  side(runsDir, "20260920-100000", "ttl-cache", "candidate");
+  side(runsDir, "20260920-100000", "announcements", "previous");
+  side(runsDir, "20260920-100000", "announcements", "candidate");
+  side(runsDir, "20260921-100000", "ttl-cache", "previous");
+  side(runsDir, "20260921-100000", "ttl-cache", "candidate");
+
+  const batches = listBatches(runsDir);
+
+  assert.deepEqual(batches.map((batch) => batch.stamp), ["20260921-100000", "20260920-100000"]);
+  assert.deepEqual(batches[1]?.pairs.map((pair) => pair.fixture), ["announcements", "ttl-cache"]);
+  const pair = batches[0]?.pairs[0];
+  assert.equal(pair?.fixture, "ttl-cache");
+  assert.equal(pair?.previous?.runId, "20260921-100000-ttl-cache-previous");
+  assert.equal(pair?.candidate?.runId, "20260921-100000-ttl-cache-candidate");
+  assert.equal(pair?.previous?.environment, "previous");
+});
+
+test("listBatches keeps an incomplete pair with null for the missing or unreadable side, and ignores what is not a run", () => {
+  const runsDir = join(tempDir(), "runs");
+  const stamp = "20260920-100000";
+  side(runsDir, stamp, "ttl-cache", "previous");
+  // No candidate for ttl-cache; announcements' candidate is not valid JSON; holiday's has no run.json at all.
+  side(runsDir, stamp, "announcements", "previous");
+  side(runsDir, stamp, "announcements", "candidate", "{ nope");
+  side(runsDir, stamp, "holiday-api-client", "previous", "");
+  side(runsDir, stamp, "holiday-api-client", "candidate", JSON.stringify({ ...record(), schema: 1 }));
+  // A judgement is not a side; a file is not a run directory; a stray name is nothing.
+  mkdirSync(join(runsDir, `${stamp}-ttl-cache-judge`));
+  writeFileSync(join(runsDir, `${stamp}-ttl-cache-judge`, "judge.json"), "{}", "utf8");
+  writeFileSync(join(runsDir, `${stamp}-list-runs-candidate`), "", "utf8");
+  mkdirSync(join(runsDir, "notes"));
+
+  const batches = listBatches(runsDir);
+
+  assert.equal(batches.length, 1);
+  const pairs = batches[0]?.pairs ?? [];
+  assert.deepEqual(
+    pairs.map((pair) => [pair.fixture, pair.previous !== null, pair.candidate !== null]),
+    [
+      ["announcements", true, false],
+      ["holiday-api-client", false, false],
+      ["ttl-cache", true, false],
+    ],
+  );
+});
+
+test("latestBatch is the newest batch the filter accepts, or null", () => {
+  const runsDir = join(tempDir(), "runs");
+  assert.equal(latestBatch(runsDir), null);
+  assert.deepEqual(listBatches(runsDir), []);
+
+  side(runsDir, "20260920-100000", "ttl-cache", "previous");
+  side(runsDir, "20260920-100000", "ttl-cache", "candidate");
+  side(runsDir, "20260921-100000", "ttl-cache", "candidate");
+
+  assert.equal(latestBatch(runsDir)?.stamp, "20260921-100000");
+  const complete = latestBatch(runsDir, (batch) => batch.pairs.every((pair) => pair.previous !== null && pair.candidate !== null));
+  assert.equal(complete?.stamp, "20260920-100000");
+  assert.equal(latestBatch(runsDir, () => false), null);
 });

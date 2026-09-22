@@ -49,6 +49,58 @@ export type JudgeInput = {
 /** Judge rows are `judge.<judge-id>`; print.ts sets them apart from the mechanical rows by this. */
 export const JUDGE_ROW_PREFIX = "judge.";
 
+/**
+ * One criterion across a batch: which fixtures improved, regressed, stayed put or had no
+ * verdict. Names, not just counts, so a "2 regressed" always says which two. Nothing here
+ * sums across criteria.
+ */
+export type RollupRow = {
+  id: string;
+  label: string;
+  improved: string[];
+  regressed: string[];
+  unchanged: string[];
+  na: string[];
+};
+
+export type Rollup = {
+  fixtures: number;
+  rows: RollupRow[];
+  /** Every fixture's warnings, each prefixed with its fixture id. */
+  warnings: string[];
+};
+
+const BUCKETS: Record<Classification, keyof Omit<RollupRow, "id" | "label">> = {
+  improved: "improved",
+  regressed: "regressed",
+  unchanged: "unchanged",
+  "n/a": "na",
+};
+
+/**
+ * The per-fixture comparisons of one batch folded into one row per criterion. Rows keep the
+ * order of the first comparison that has them, mechanical rows before judge rows whichever
+ * comparison introduced them, so a fixture without judge rows never reorders the rest.
+ */
+export function rollup(comparisons: Comparison[]): Rollup {
+  const rows = new Map<string, RollupRow>();
+  for (const judge of [false, true]) {
+    for (const comparison of comparisons) {
+      for (const row of comparison.rows) {
+        if (row.id.startsWith(JUDGE_ROW_PREFIX) !== judge) continue;
+        const entry = rows.get(row.id) ?? { id: row.id, label: row.label, improved: [], regressed: [], unchanged: [], na: [] };
+        rows.set(row.id, entry);
+        entry[BUCKETS[row.classification]].push(comparison.fixture);
+      }
+    }
+  }
+  return {
+    fixtures: comparisons.length,
+    rows: [...rows.values()],
+    warnings: comparisons.flatMap((c) => c.warnings.map((warning) => `${c.fixture}: ${warning}`)),
+  };
+}
+
 type Side = "previous" | "candidate";
 
 /**

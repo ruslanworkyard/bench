@@ -64,6 +64,15 @@ Goal: an open-source npm package (`npx harnessbench`) people adopt. Quality over
   or orphaned rather than hiding it. `judge` is incremental and merges into the pair's
   `judge.json`; `compare` never calls a model.
 - **Bin name == package name** so `npx harnessbench` works.
+- **A batch is a stamp.** One `run` invocation runs a set of fixtures under one `YYYYMMDD-HHMMSS`
+  stamp; nothing else on disk names the batch. A pair is `<stamp>-<fixture>-previous` +
+  `<stamp>-<fixture>-candidate`, a judgement `<stamp>-<fixture>-judge`. Addressing, the same for
+  `compare` and `judge`: no arguments → the newest stamp with at least one complete pair;
+  `--stamp <s>` → that batch; `--fixture <id>` → that fixture's latest pair; two run ids → that
+  pair. A pair with a missing or unreadable side is listed with the reason, never dropped; a
+  batch with no complete pair is refused naming the stamp and what is missing. The roll-up
+  across fixtures is one row per criterion listing the fixture ids per classification (counts
+  always come with names); no composite, no row summing across criteria.
 
 ## File relationship between the tool and a host repo
 
@@ -78,7 +87,8 @@ Goal: an open-source npm package (`npx harnessbench`) people adopt. Quality over
     fixtures/<id>/                      fixture.json + prompt.md, committed; built-ins are copied here
     judges/<id>/                        judge.json + prompt.md, committed; built-ins are copied here
     runs/<ts>-<fixture>-<env>/          one run, gitignored: run.json, raw.jsonl, transcript.jsonl,
-                                        diff.patch, setup.log, test.log, agent.stderr.log
+                                        diff.patch, setup.log, test.log, agent.stderr.log; every
+                                        directory of one `run` invocation shares <ts> (the "stamp")
     runs/<ts>-<fixture>-judge/          the verdicts on that pair, gitignored: judge.json, and per
                                         judge id prompt.txt (as sent) + response.json (raw reply)
 ```
@@ -101,7 +111,7 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
 | `agents/` | drive one external agent | `run(AgentRequest): Promise<AgentResult>` — returns every outcome, throws for none |
 | `judge/` | ask a model one question | `context.ts` (pure: pair → text), `provider.ts` (the only file that knows the AI SDK packages), `judge.ts` (`Judge` interface, `modelJudge`) |
 | `commands/` | compose the above, in order | init: detect → plan → apply → print; run: preflight → workspace → agent → record → print; judge: pair → refusals → context → model → record → print |
-| `cli.ts` | argv, exit codes (set via `process.exitCode`, never `process.exit()` except in the `run` signal handler, which writes with `writeSync` first: on macOS a piped stdout is written asynchronously and `exit()` cut a long `--json` off at 8 KB); reads `.harnessbench/.env` (`env.ts`) for run/judge/compare before they preflight; installs the SIGINT/SIGTERM handler for `run` only | nothing else |
+| `cli.ts` | argv (a `REPEATABLE_FLAGS` value flag such as `--tag` collects into a `string[]`, read with `values()`), exit codes (set via `process.exitCode`, never `process.exit()` except in the `run` signal handler, which writes with `writeSync` first: on macOS a piped stdout is written asynchronously and `exit()` cut a long `--json` off at 8 KB); reads `.harnessbench/.env` (`env.ts`) for run/judge/compare before they preflight; installs the SIGINT/SIGTERM handler for `run` only | nothing else |
 
 **Domain nouns** — an object that appears in several layers gets its own top-level file:
 - `config.ts` — `Config` type (`baseBranch`, `testCommand`, `setupCommand`, the `agent` block,
@@ -115,7 +125,11 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
   then drops the verdict schema, which is what the first OpenRouter run hit; the other three
   providers ignore it); `judges` = the ids to run, in order. `init` writes `model: ""`: the choice is
   the user's, and `judge` refuses until it is made.
-- `fixtures.ts` — locate packaged fixtures via `import.meta.url`, copy into the host.
+- `fixtures.ts` — locate packaged fixtures via `import.meta.url`, copy into the host;
+  `selectFixtures(dir, ids, tags)`: all / the ids in the order given (deduplicated) / those
+  carrying any tag / the intersection; unknown id and empty selection are `CliError`s listing the
+  fixtures and the tags in use. Tags are read from each `fixture.json` only when `--tag` is given;
+  a fixture whose file is missing or malformed carries none.
 - `judges.ts` — the judge catalogue: `validateJudge` (unknown keys, `context` from the fixed
   menu `prompt | diff | tests | finalMessage | toolLog | transcript`, optional `provider` /
   `model` / `apiKeyEnv` overrides), `listJudges(root)` (duplicate ids refused, missing prompt
@@ -138,7 +152,11 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
   (the shape of both `setup` and `tests`: command, exitCode, durationMs, timedOut),
   `writeRunRecord`, `readRunRecord`.
   Later commands (compare, judge) read a run only through `readRunRecord`, which rejects any
-  other schema number; that is the one place run-file compatibility lives.
+  other schema number; that is the one place run-file compatibility lives. Also `RUN_ID`
+  (`/^(\d{8}-\d{6})-(.+)-(previous|candidate)$/`, moved here from `commands/compare.ts`),
+  `Batch = {stamp, pairs: [{fixture, previous | null, candidate | null}]}`, `listBatches(runsDir)`
+  (newest stamp first, pairs by fixture id, a side that is missing or does not read is `null`,
+  `-judge` directories and files ignored) and `latestBatch(runsDir, filter?)`.
 - `telemetry.ts` — `telemetry(events, durationMs): Telemetry`, pure, from the normalised
   transcript only (never the raw stream, so every adapter gets it free): per-thread stats
   (`main` and one entry per sub-agent with its spawning tool and model), reads/turns before
@@ -173,8 +191,19 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
   read counts; absolute floors turns 3, tool calls 3, toolFailures 1, files 1, lines 20,
   readsBeforeFirstEdit 3, duplicateReads 2); a delta must clear both. `subAgents` is
   `neutral`: always `unchanged`, delta shown, note lists `<tool> on <model>` per side.
-  No composite. `commands/compare.ts` loads a pair (two ids, or the latest invocation for
-  `--fixture`), orders it by environment, refuses mismatches, prints. It also owns
+  No composite. `rollup(comparisons): Rollup` is pure too: `{fixtures, rows: RollupRow[],
+  warnings}`, one `RollupRow` (`id, label, improved[], regressed[], unchanged[], na[]` of fixture
+  ids) per row id seen in any comparison, mechanical rows first then judge rows, each in the
+  order of the first comparison that has it; warnings are every fixture's, prefixed
+  `<fixture>: `. `commands/compare.ts` has two entry points: `compare` loads a pair (two ids, or
+  the latest invocation for `--fixture`), orders it by environment, refuses mismatches, prints;
+  `compareBatch` loads a batch (`loadBatch(root, stamp?)`) and prints the roll-up plus the
+  per-fixture tables (`formatBatch` / `formatBatchMarkdown`, or `--json` as `BatchComparison =
+  {stamp, fixtures: [{fixture, comparison | null, error | null}], rollup}`). `compareBatchRecords(root,
+  config, batch)` is the shared step (also used by `judgeBatch`): each complete pair through
+  `orderPair` (a refusal becomes that fixture's `error`), `loadJudgement` (a misconfigured judge
+  is still the whole command's refusal), `compare`; incomplete pairs get `describePair`'s
+  `<fixture>: <side> side missing | unreadable (no valid run.json)`. It also owns
   `findJudgeRecord(runsDir, previous, candidate)` (the `*-<fixture>-judge` directory whose
   `judge.json` names both run ids, not the one with the pair's stamp; unreadable or foreign
   files are skipped) and `loadJudgement(root, config, previous, candidate)` (null when
@@ -214,7 +243,14 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
   verdict line or `kept (rubric unchanged)`) followed by `formatComparison`, `--json` prints
   the `Comparison`. `JudgeRecord` (`schema: 1`) lives here, like `Comparison` lives in
   `compare.ts`. `deps.judgeFor(target)` is the seam tests use to hand in `ai/test`'s
-  `MockLanguageModelV4`; `cli.ts` passes nothing.
+  `MockLanguageModelV4`; `cli.ts` passes nothing. `judgeBatch(options, deps)` is the batch
+  entry point: `loadBatch`, then `judgePair` on every complete pair at once
+  (`Promise.allSettled`; judges within a pair stay sequential), then `compareBatchRecords` and
+  `formatBatch` with each fixture's `JudgePairResult`; a pair a judge refuses keeps its table
+  and gets `error: judging skipped: <why>`, a pair with a missing side is listed with the
+  reason; when no pair was judged at all the command refuses with every reason, exit 1.
+  `cli.ts` picks `judge`/`compare` (two ids or `--fixture`) or `judgeBatch`/`compareBatch`
+  (nothing or `--stamp`); mixing the three ways of addressing is a usage error.
 - `env.ts` — `loadEnvFile(root, env = process.env): string[]`: `.harnessbench/.env` via
   `util.parseEnv`, set-if-unset, returns the names it set (tests only). Missing file → `[]`;
   unreadable or malformed → `CliError` naming the file and a line number, never a value.
@@ -438,7 +474,8 @@ a fake shell script stands in, so the suite is free, offline and deterministic.
   above the table. `judge --all` flag. The instruction block now says "in at most two
   sentences". `run` loads the judgement even without `--judge`, so the table shows `not
   judged` rows; a config whose judges cannot be loaded costs the rows (`judge rows skipped:` on
-  stderr), not the run. Not built: roll-ups across judges or fixtures, gating, position swap.
+  stderr), not the run. Not built: roll-ups across judges, gating, position swap (the roll-up
+  across fixtures came on 2026-09-22, below).
 
 - Concurrent sides and clean interruption (2026-09-22). `run` starts both `runSide` calls
   and awaits `Promise.allSettled`; records stay in `ENVIRONMENTS` order (`previous`,
@@ -459,11 +496,47 @@ a fake shell script stands in, so the suite is free, offline and deterministic.
   `setup.log`) and no `run.json`; nothing else on the host is cleaned up, and the existing
   "unreadable" handling covers it downstream. Tests never `pgrep`: the fakes write pids and
   marks to `FAKE_CLAUDE_MARKS`, named by run id; `fake-claude.sh` writes its dump atomically
-  (`mv`) because both sides now share the path at the same time. Not built: several fixtures
-  per invocation, `--concurrency`, baseline reuse.
+  (`mv`) because both sides now share the path at the same time. Not built: baseline reuse
+  (several fixtures per invocation and `--concurrency` came the same day, below).
+
+- Fixture sets (2026-09-22). `run [<fixture-id>...] [--tag <tag>]... [--concurrency <n>]`
+  runs a batch under one stamp (see the "batch is a stamp" decision above). Selection is
+  `selectFixtures` in `fixtures.ts`; bare `run` is every fixture. Preflight happens once, then
+  stderr gets `running N fixture(s) × 2 sides = M runs: <ids>` (`formatBatchPlan`) before any
+  side starts. Every side of every fixture goes through one `limiter(max)` (a plain FIFO queue in
+  `commands/run.ts`; unlimited without `--concurrency`), fixtures in listing order, previous
+  before candidate, so `--concurrency 1` serialises in that order. `runSide` is unchanged;
+  progress lines gained a fixture column (`formatProgress(elapsed, fixture, fixtureWidth, env,
+  event)`, width = the longest id in the batch). Per fixture, `Promise.allSettled` over its two
+  sides → `settledSides(fixture, settled)` → a `FixtureOutcome` (`sides`, `failures` as
+  `CliError`s whose messages are prefixed `<fixture>: ` and still say where a surviving record
+  is, `comparison`, `error`); with both sides in, `--judge` calls `judgePair` right away (a
+  refusal is `<fixture>: judging skipped: …` on stderr, once per fixture), then `loadJudgement`
+  (a config whose judges cannot load costs the rows, said once per distinct message) and
+  `compare`. Fixtures are independent: one side's failure never stops another fixture. Output,
+  in listing order, after everything finished: one fixture → exactly the old text (summaries then
+  table); several → `formatBatch`: `formatRollup` (`harnessbench rollup  N fixtures · code
+  <sha>`, `ROLLUP_LINE`, `warning:` lines, then `Label  word N [ids]   word N [ids]`; judge rows
+  say `candidate` / `previous` / `tie`, mechanical `improved` / `regressed` / `unchanged`, `n/a`
+  only when non-zero) then `── <fixture> ──` sections; a failed fixture shows the surviving
+  side's summary and `error: …` in place of a table. `--json` always prints `RunBatchResult =
+  {stamp, fixtures: [{fixture, records, comparison | null, error | null}], rollup}` (decided:
+  one JSON shape whatever the count, so the old `[previous, candidate, comparison]` array is
+  gone). After printing, any rejected side throws one `CliError` listing every failed fixture
+  and side, exit code the largest; otherwise `cli.ts` exits with the worst agent outcome over
+  every record in the batch. `run()` returns the `RunBatchResult`. Markdown for a batch
+  (`formatBatchMarkdown`, `compare --markdown` over a batch): the roll-up as a table with
+  fixture names in the cells, then each fixture's table inside `<details><summary><fixture>
+  </summary>` with blank lines so GitHub renders it. Tests: `test/fixtures/concurrent-claude.sh`
+  now names its marks by run id (`<run-id>.started/.finished`) so six sides of a batch each
+  leave their own; the setup-failure-in-one-fixture tests use a `setupCommand` that inspects
+  `$(pwd)`, which ends in `<run-id>/tree`. Not built: baseline reuse, gating, per-fixture agent
+  settings, `run` telling apart a stamp collision (one-second resolution, as before).
 
 ## Next
 
+0. A real batch (`npx . run --judge --keep`) on this repo, three fixtures; read the roll-up and
+   check the wall clock and the progress lines are legible with six sides interleaved.
 1. Test `init --dry-run` on a real repo with a real `CLAUDE.md`; check the harness list,
    test command and base branch are right. Fix what's wrong.
 2. Real-agent smoke of `run` (see above); fix what the real stream shows that the recording

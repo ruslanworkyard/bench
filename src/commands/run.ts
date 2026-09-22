@@ -2,10 +2,11 @@ import { createWriteStream, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { AgentAdapter, AgentResult } from "../agents/types.js";
-import { compare, type JudgeInput } from "../compare.js";
-import { RUNS_DIR, type AgentConfig } from "../config.js";
+import { compare, rollup, type Comparison, type JudgeInput, type Rollup } from "../compare.js";
+import { FIXTURES_DIR, RUNS_DIR, type AgentConfig } from "../config.js";
 import { dirtyHarnessFiles, harnessFiles, type HarnessSnapshot } from "../detect/harness.js";
 import { CliError } from "../errors.js";
+import { selectFixtures } from "../fixtures.js";
 import {
   requireAgent,
   requireAgentCommand,
@@ -19,7 +20,14 @@ import {
   requireRepo,
   type LoadedFixture,
 } from "../preflight.js";
-import { formatComparison, formatDirtyHarness, formatProgress, formatRun, formatSameHarness } from "../print.js";
+import {
+  formatBatch,
+  formatBatchPlan,
+  formatDirtyHarness,
+  formatProgress,
+  formatSameHarness,
+  type BatchFixtureReport,
+} from "../print.js";
 import {
   ENVIRONMENTS,
   runStamp,
@@ -36,7 +44,12 @@ import { defaultDeps, judgePair, type JudgeDeps } from "./judge.js";
 
 export type RunOptions = {
   cwd: string;
-  fixtureId: string;
+  /** Fixture ids to run; none means every fixture (or every fixture carrying one of `tags`). */
+  fixtureIds: string[];
+  /** Fixtures carrying any of these tags; with `fixtureIds`, the intersection. */
+  tags: string[];
+  /** Sides in flight at once; unlimited when absent. */
+  concurrency?: number | undefined;
   base?: string | undefined;
   agent?: string | undefined;
   /** Override config.agent.maxTurns / config.agent.model for this run only. */
@@ -44,9 +57,21 @@ export type RunOptions = {
   model?: string | undefined;
   keep: boolean;
   json: boolean;
-  /** Run the configured judges on the pair once both sides are in. */
+  /** Run the configured judges on each pair as soon as its two sides are in. */
   judge: boolean;
 };
+
+/** One fixture's outcome in a batch: its records, its table, and what went wrong if anything. */
+export type RunFixtureResult = {
+  fixture: string;
+  /** The sides that finished, previous first. */
+  records: RunRecord[];
+  comparison: Comparison | null;
+  error: string | null;
+};
+
+/** What `run` returns and `--json` prints. */
+export type RunBatchResult = { stamp: string; fixtures: RunFixtureResult[]; rollup: Rollup };
 
 /** A test suite, or a dependency install, that has not finished in this long is not going to. */
 const COMMAND_TIMEOUT_MS = 10 * 60_000;
@@ -80,14 +105,15 @@ type Side = {
 };
 
 /**
- * Runs one fixture twice on the code at HEAD, both sides at once: with the harness at the
- * merge base with the base branch (`previous`) and with the harness at HEAD (`candidate`).
- * Each side gets its own workspace and run directory; while they run, one progress line per
- * event goes to stderr. Both are recorded and summarised, previous first whichever finished
- * first, and the comparison of the two comes last.
+ * Runs a set of fixtures on the code at HEAD, every side of every fixture at once under one
+ * stamp: with the harness at the merge base with the base branch (`previous`) and with the
+ * harness at HEAD (`candidate`). Each side gets its own workspace and run directory; while
+ * they run, one progress line per event goes to stderr. Each fixture is compared (and, with
+ * --judge, judged) as soon as its two sides are in, and the output comes in fixture order:
+ * one fixture's summaries and table alone, or several under their roll-up.
  */
-export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): Promise<RunRecord[]> {
-  // One clock for both sides' progress lines, started before any preflight.
+export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): Promise<RunBatchResult> {
+  // One clock for every side's progress lines, started before any preflight.
   const invokedAt = Date.now();
   requireGit();
   const root = requireRepo(options.cwd);
@@ -105,7 +131,9 @@ export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): P
   const adapter = requireAgent(agentConfig.name);
   const agentPath = requireAgentCommand(adapter, agentConfig);
   requireCredentials(adapter);
-  const fixture = requireFixture(root, options.fixtureId);
+  const fixtures = selectFixtures(join(root, FIXTURES_DIR), options.fixtureIds, options.tags).map((each) =>
+    requireFixture(root, each.id),
+  );
 
   const head = requireHarnessSnapshot(root, "HEAD", config.harness.extraPaths);
   const previous = requireHarnessSnapshot(root, mergeBase, config.harness.extraPaths);
@@ -118,13 +146,16 @@ export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): P
   if (dirty.length > 0) console.error(formatDirtyHarness(dirty));
   if (head.hash === previous.hash) console.error(formatSameHarness(mergeBase));
 
-  // One timestamp for both sides, so the two run ids differ only in their environment.
+  const ids = fixtures.map((each) => each.fixture.id);
+  console.error(formatBatchPlan(ids));
+  const fixtureWidth = Math.max(...ids.map((id) => id.length));
+
+  // One timestamp for the whole batch, so every run id differs only in fixture and environment.
   const stamp = runStamp(new Date());
   const shared = {
     root,
     head,
     baseBranch,
-    fixture,
     adapter,
     agentConfig,
     agentPath,
@@ -132,78 +163,153 @@ export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): P
     testCommand: config.testCommand,
     keep: options.keep,
   };
-  const settled = await Promise.allSettled(
-    ENVIRONMENTS.map((environment) =>
-      runSide({
-        ...shared,
-        runId: `${stamp}-${fixture.fixture.id}-${environment}`,
-        environment,
-        harness: environment === "previous" ? previous : head,
-        progress: (event) => {
-          process.stderr.write(`${formatProgress(Date.now() - invokedAt, environment, event)}\n`);
-        },
-      }),
-    ),
+  const start = limiter(options.concurrency);
+  // Said once: a config the judges cannot be loaded for is the same for every fixture.
+  const said = new Set<string>();
+  const sayOnce = (message: string): void => {
+    if (said.has(message)) return;
+    said.add(message);
+    console.error(message);
+  };
+
+  const outcomes = await Promise.all(
+    fixtures.map(async (fixture): Promise<FixtureOutcome> => {
+      const settled = await Promise.allSettled(
+        ENVIRONMENTS.map((environment) =>
+          start(() =>
+            runSide({
+              ...shared,
+              fixture,
+              runId: `${stamp}-${fixture.fixture.id}-${environment}`,
+              environment,
+              harness: environment === "previous" ? previous : head,
+              progress: (event) => {
+                process.stderr.write(
+                  `${formatProgress(Date.now() - invokedAt, fixture.fixture.id, fixtureWidth, environment, event)}\n`,
+                );
+              },
+            }),
+          ),
+        ),
+      );
+      const outcome = settledSides(fixture.fixture.id, settled);
+      if (outcome.sides.length !== 2) return outcome;
+
+      // Judged as soon as this pair is in, whatever the other fixtures are doing. A refusal is
+      // not a failure of the run: both records exist, so say why on stderr, for this fixture
+      // only, and keep the exit code. The pair is new, so every configured judge runs.
+      const pair = outcome.sides.map((side) => side.record) as [RunRecord, RunRecord];
+      if (options.judge) {
+        try {
+          await judgePair(root, config, ...pair, deps, true);
+        } catch (error) {
+          if (!(error instanceof CliError)) throw error;
+          console.error(`${fixture.fixture.id}: judging skipped: ${oneLine(error.message)}`);
+        }
+      }
+      // The table names the configured judges even without --judge; a config the judges cannot
+      // be loaded for costs the rows, not the run.
+      let judgement: JudgeInput | null = null;
+      try {
+        judgement = loadJudgement(root, config, ...pair);
+      } catch (error) {
+        if (!(error instanceof CliError)) throw error;
+        sayOnce(`judge rows skipped: ${oneLine(error.message)}`);
+      }
+      outcome.comparison = compare(...pair, judgement);
+      return outcome;
+    }),
   );
-  const sides = settledSides(settled);
-  const records = sides.map((side) => side.record);
-  const summaries = sides.map((side) => formatRun(side.record, side.stderrPath));
 
-  const pair = records as [RunRecord, RunRecord];
-
-  // A refusal is not a failure of the run: both records exist, so say why and keep the exit code.
-  // The pair is new, so every configured judge runs.
-  if (options.judge) {
-    try {
-      await judgePair(root, config, ...pair, deps, true);
-    } catch (error) {
-      if (!(error instanceof CliError)) throw error;
-      console.error(`judging skipped: ${oneLine(error.message)}`);
-    }
+  const result: RunBatchResult = {
+    stamp,
+    fixtures: outcomes.map(({ fixture, sides, comparison, error }) => ({
+      fixture,
+      records: sides.map((side) => side.record),
+      comparison,
+      error,
+    })),
+    rollup: rollup(outcomes.flatMap((each) => (each.comparison === null ? [] : [each.comparison]))),
+  };
+  if (options.json) console.log(JSON.stringify(result, null, 2));
+  else {
+    const reports: BatchFixtureReport[] = outcomes.map(({ fixture, sides, comparison, error }) => ({
+      fixture,
+      sides,
+      comparison,
+      error,
+    }));
+    console.log(formatBatch(result.rollup, reports, head.sha));
   }
-  // The table names the configured judges even without --judge; a config the judges cannot be
-  // loaded for costs the rows, not the run.
-  let judgement: JudgeInput | null = null;
-  try {
-    judgement = loadJudgement(root, config, ...pair);
-  } catch (error) {
-    if (!(error instanceof CliError)) throw error;
-    console.error(`judge rows skipped: ${oneLine(error.message)}`);
-  }
-  const comparison = compare(...pair, judgement);
 
-  if (options.json) console.log(JSON.stringify([...records, comparison], null, 2));
-  else console.log([...summaries, formatComparison(comparison)].join("\n\n"));
-  return records;
+  // Every fixture had its say; now the failures, all of them, as the one error the shell sees.
+  const failures = outcomes.flatMap((each) => each.failures);
+  if (failures.length > 0) {
+    throw new CliError(failures.map((each) => each.message).join("\n"), Math.max(...failures.map((each) => each.exitCode)));
+  }
+  return result;
 }
 
 function oneLine(message: string): string {
   return message.replace(/\s*\n\s*/g, " ");
 }
 
+/**
+ * At most `max` tasks running at once, started in the order they were handed in; no cap when
+ * `max` is undefined. A plain queue: nothing is ever reordered.
+ */
+function limiter(max: number | undefined): <T>(task: () => Promise<T>) => Promise<T> {
+  if (max === undefined) return (task) => task();
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  return async (task) => {
+    if (active >= max) await new Promise<void>((resolve) => waiting.push(resolve));
+    active++;
+    try {
+      return await task();
+    } finally {
+      active--;
+      waiting.shift()?.();
+    }
+  };
+}
+
 type SideResult = { record: RunRecord; stderrPath: string };
 
-/**
- * Both sides' outcomes, in `ENVIRONMENTS` order, or the one error to throw for them. A side's
- * failure never cancels the other: its record is still worth having, so the error names the
- * failure(s) and says where any completed record is. The exit code is the worst of the
- * failures; anything that is not a CliError is a bug and is rethrown as it is.
- */
-function settledSides(settled: PromiseSettledResult<SideResult>[]): SideResult[] {
-  const failures = settled.flatMap((result) => (result.status === "rejected" ? [result.reason as unknown] : []));
-  const unexpected = failures.find((reason) => !(reason instanceof CliError));
-  if (unexpected !== undefined) throw unexpected;
-  const fulfilled = settled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
-  if (failures.length === 0) return fulfilled;
+/** One fixture's sides as they settled, plus what the batch adds to it once the pair is in. */
+type FixtureOutcome = {
+  fixture: string;
+  /** The sides that finished, in `ENVIRONMENTS` order. */
+  sides: SideResult[];
+  /** The sides that did not, each error prefixed with the fixture. */
+  failures: CliError[];
+  comparison: Comparison | null;
+  error: string | null;
+};
 
-  const errors = failures as CliError[];
-  const kept = fulfilled.map(
+/**
+ * One fixture's outcome from its settled sides. A side's failure never cancels the other: its
+ * record is still worth having, so the failure names the fixture and side and says where any
+ * completed record is. Anything that is not a CliError is a bug and is rethrown as it is.
+ */
+function settledSides(fixture: string, settled: PromiseSettledResult<SideResult>[]): FixtureOutcome {
+  const reasons = settled.flatMap((result) => (result.status === "rejected" ? [result.reason as unknown] : []));
+  const unexpected = reasons.find((reason) => !(reason instanceof CliError));
+  if (unexpected !== undefined) throw unexpected;
+  const sides = settled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+  const kept = sides.map(
     ({ record }) => `the ${record.environment} side ran and its record is at ${RUNS_DIR}/${record.runId}`,
   );
-  throw new CliError(
-    [...errors.map((error) => error.message), ...kept].join("\n"),
-    Math.max(...errors.map((error) => error.exitCode)),
+  const failures = (reasons as CliError[]).map(
+    (error) => new CliError([`${fixture}: ${error.message}`, ...kept].join("\n"), error.exitCode),
   );
+  return {
+    fixture,
+    sides,
+    failures,
+    comparison: null,
+    error: failures.length === 0 ? null : failures.map((each) => each.message).join("\n"),
+  };
 }
 
 /**

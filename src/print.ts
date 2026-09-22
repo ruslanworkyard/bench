@@ -3,7 +3,7 @@ import { relative } from "node:path";
 
 // Type-only, so compare.ts importing the value formatters below is not a cycle.
 import type { JudgePairResult, JudgeRecord } from "./commands/judge.js";
-import { JUDGE_ROW_PREFIX, type Comparison, type Row } from "./compare.js";
+import { JUDGE_ROW_PREFIX, type Comparison, type Rollup, type RollupRow, type Row } from "./compare.js";
 import { ENV_FILE, RUNS_DIR } from "./config.js";
 import type { HarnessEntry } from "./detect/harness.js";
 import type { Detection } from "./detect/types.js";
@@ -271,13 +271,26 @@ function ended(result: CommandResult): string {
 
 /**
  * One line of progress while a run is in flight, for stderr:
- * `[05:01] previous   agent completed (30 turns)`. Elapsed counts from the `run` invocation,
- * the same clock for both sides, so the lines read as one timeline.
+ * `[05:01] ttl-cache  previous   agent completed (30 turns)`. Elapsed counts from the `run`
+ * invocation, the same clock for every side, so the lines read as one timeline. The fixture
+ * column is `fixtureWidth` wide: the longest id in the batch.
  */
-export function formatProgress(elapsedMs: number, environment: string, event: ProgressEvent): string {
+export function formatProgress(
+  elapsedMs: number,
+  fixture: string,
+  fixtureWidth: number,
+  environment: string,
+  event: ProgressEvent,
+): string {
   const total = Math.floor(elapsedMs / 1000);
   const clock = `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
-  return `[${clock}] ${environment.padEnd(11)}${progressText(event)}`;
+  return `[${clock}] ${fixture.padEnd(fixtureWidth)}  ${environment.padEnd(11)}${progressText(event)}`;
+}
+
+/** What `run` says on stderr before any side starts: how much it is about to do. */
+export function formatBatchPlan(fixtures: string[]): string {
+  const n = fixtures.length;
+  return `running ${n} fixture${n === 1 ? "" : "s"} × 2 sides = ${n * 2} runs: ${fixtures.join(", ")}`;
 }
 
 function progressText(event: ProgressEvent): string {
@@ -396,6 +409,109 @@ export function formatComparison(c: Comparison): string {
       lines.push(line(row, first));
       for (const piece of rest) lines.push(`${" ".repeat(noteAt)}${piece}`);
     }
+  }
+  return lines.join("\n");
+}
+
+/** Printed above every roll-up. Its counts are fixtures, and every count names them. */
+export const ROLLUP_LINE = "one run per side per fixture; counts are fixtures, names in brackets";
+
+/** The classification words of a roll-up cell: verdict words for a judge row, delta words otherwise. */
+function bucketWords(row: RollupRow): Array<[string, string[]]> {
+  const judge = row.id.startsWith(JUDGE_ROW_PREFIX);
+  return [
+    [judge ? "candidate" : "improved", row.improved],
+    [judge ? "previous" : "regressed", row.regressed],
+    [judge ? "tie" : "unchanged", row.unchanged],
+    ["n/a", row.na],
+  ];
+}
+
+/**
+ * The batch's roll-up: one line per criterion, each classification that applies with its
+ * count and the fixtures behind it. `n/a` appears only when some fixture has it.
+ */
+export function formatRollup(rollup: Rollup, headSha: string): string {
+  const lines: string[] = [];
+  lines.push(`harnessbench rollup  ${plural(rollup.fixtures, "fixture")} · code ${short(headSha)}`);
+  lines.push("");
+  lines.push(ROLLUP_LINE);
+  for (const warning of rollup.warnings) lines.push(`warning: ${warning}`);
+  lines.push("");
+  const width = Math.max(0, ...rollup.rows.map((row) => row.label.length));
+  for (const row of rollup.rows) {
+    const cells = bucketWords(row)
+      .filter(([, fixtures]) => fixtures.length > 0)
+      .map(([word, fixtures]) => `${word} ${fixtures.length} [${fixtures.join(", ")}]`);
+    lines.push(`${row.label.padEnd(width)}  ${cells.join("   ")}`);
+  }
+  return lines.join("\n");
+}
+
+/** What one fixture contributes to a batch's output; the command fills in what it has. */
+export type BatchFixtureReport = {
+  fixture: string;
+  /** `run` only: each side that finished, previous first, for the summaries. */
+  sides?: Array<{ record: RunRecord; stderrPath: string }>;
+  /** `judge` only: what judging this pair did. */
+  judging?: JudgePairResult;
+  comparison: Comparison | null;
+  /** Why there is no comparison, or what went wrong beside one. */
+  error: string | null;
+};
+
+/** `── ttl-cache ──`: the line above each fixture's blocks in a batch. */
+export function formatFixtureHeading(fixture: string): string {
+  return `── ${fixture} ──`;
+}
+
+/**
+ * A batch's text output: the roll-up, then every fixture's blocks under its heading, in the
+ * order given. A batch of one fixture prints that fixture's blocks alone, exactly as a
+ * single-fixture command does.
+ */
+export function formatBatch(rollup: Rollup, fixtures: BatchFixtureReport[], headSha: string): string {
+  const blocks = (report: BatchFixtureReport): string[] => [
+    ...(report.sides ?? []).map((side) => formatRun(side.record, side.stderrPath)),
+    ...(report.judging === undefined ? [] : [formatJudging(report.judging)]),
+    ...(report.comparison === null ? [] : [formatComparison(report.comparison)]),
+    ...(report.error === null ? [] : [`error: ${report.error}`]),
+  ];
+  if (fixtures.length === 1) return blocks(fixtures[0] as BatchFixtureReport).join("\n\n");
+  const sections = fixtures.map((report) => [formatFixtureHeading(report.fixture), ...blocks(report)].join("\n\n"));
+  return [formatRollup(rollup, headSha), ...sections].join("\n\n");
+}
+
+/**
+ * The batch as markdown: the roll-up as a table with fixture names in the cells, then each
+ * fixture's comparison table folded into a `<details>` block.
+ */
+export function formatBatchMarkdown(rollup: Rollup, fixtures: BatchFixtureReport[], headSha: string): string {
+  const lines: string[] = [];
+  lines.push(`### harnessbench: ${plural(rollup.fixtures, "fixture")} on code ${short(headSha)}`);
+  lines.push("");
+  lines.push(`_${ROLLUP_LINE}_`);
+  if (rollup.warnings.length > 0) {
+    lines.push("");
+    for (const warning of rollup.warnings) lines.push(`> **warning:** ${cell(warning)}`);
+  }
+  lines.push("");
+  lines.push("| Criterion | Improved | Regressed | Unchanged | n/a |");
+  lines.push("|---|---|---|---|---|");
+  for (const row of rollup.rows) {
+    const cells = [row.label, row.improved, row.regressed, row.unchanged, row.na].map((each) =>
+      cell(Array.isArray(each) ? each.join(", ") : each),
+    );
+    lines.push(`| ${cells.join(" | ")} |`);
+  }
+  for (const report of fixtures) {
+    lines.push("");
+    lines.push(`<details><summary>${cell(report.fixture)}</summary>`);
+    lines.push("");
+    if (report.comparison !== null) lines.push(formatComparisonMarkdown(report.comparison));
+    if (report.error !== null) lines.push(`> **error:** ${cell(report.error)}`);
+    lines.push("");
+    lines.push("</details>");
   }
   return lines.join("\n");
 }

@@ -16,9 +16,10 @@ import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 
-import { compare } from "../compare.js";
+import { compare, rollup } from "../compare.js";
 import { requireConfig } from "../preflight.js";
 import { loadJudgement } from "./compare.js";
+import type { RunBatchResult } from "./run.js";
 import { CONFIG_FILE, ENV_FILE, RUNS_DIR, type AgentConfig, type Config } from "../config.js";
 import { readRunRecord, type Environment, type RunRecord } from "../run-record.js";
 
@@ -536,7 +537,7 @@ test("--keep leaves the workspace behind and says where; without it the workspac
   }
 });
 
-test("--json prints both run.json records, previous first, then the comparison", () => {
+test("--json prints the batch: its stamp, per fixture both records (previous first) and the comparison, and the roll-up", () => {
   const root = repoWithFake("fake-claude.sh");
 
   const { stdout } = ok(root, "run", "ttl-cache", "--json");
@@ -545,7 +546,12 @@ test("--json prints both run.json records, previous first, then the comparison",
   const previous = readRunRecord(dirs.previous);
   const candidate = readRunRecord(dirs.candidate);
   const judgement = loadJudgement(root, requireConfig(root), previous, candidate);
-  assert.deepEqual(JSON.parse(stdout), [previous, candidate, compare(previous, candidate, judgement)]);
+  const comparison = compare(previous, candidate, judgement);
+  assert.deepEqual(JSON.parse(stdout), {
+    stamp: previous.runId.replace(/-ttl-cache-previous$/, ""),
+    fixtures: [{ fixture: "ttl-cache", records: [previous, candidate], comparison, error: null }],
+    rollup: rollup([comparison]),
+  });
   assert.doesNotMatch(stdout, /Tool calls\s+2/);
 });
 
@@ -644,11 +650,122 @@ test("run refuses a malformed .harnessbench/.env without echoing it", () => {
   assert.doesNotMatch(stderr, /sk-pasted/);
 });
 
-test("run needs a fixture id", () => {
-  const { status, stderr } = fails(repo(), "run");
+/** Every run directory's name, sorted. */
+function runIds(root: string): string[] {
+  return readdirSync(join(root, RUNS_DIR)).filter((name) => /-(previous|candidate)$/.test(name)).sort();
+}
 
-  assert.equal(status, 2);
-  assert.match(stderr, /run needs a fixture id/);
+test("bare run selects every fixture: one stamp, one pair each, the roll-up above the tables", () => {
+  const root = repoWithFake("fake-claude.sh");
+
+  const { stdout, stderr } = ok(root, "run");
+
+  const ids = runIds(root);
+  assert.equal(ids.length, 6, ids.join(", "));
+  const stamps = new Set(ids.map((id) => id.slice(0, 15)));
+  assert.equal(stamps.size, 1, `stamps: ${[...stamps].join(", ")}`);
+  const [stamp] = [...stamps] as [string];
+  for (const fixture of ["announcements", "holiday-api-client", "ttl-cache"]) {
+    for (const side of ["previous", "candidate"]) {
+      assert.ok(ids.includes(`${stamp}-${fixture}-${side}`), `${fixture} ${side} missing from ${ids.join(", ")}`);
+      assert.equal(readRunRecord(join(root, RUNS_DIR, `${stamp}-${fixture}-${side}`)).outcome, "completed");
+    }
+  }
+  assert.match(stderr, /^running 3 fixtures × 2 sides = 6 runs: announcements, holiday-api-client, ttl-cache$/m);
+  // The plan line comes after preflight's warnings and before the first progress line.
+  assert.ok(stderr.indexOf("harness is identical") < stderr.indexOf("running 3 fixtures"), stderr);
+  assert.ok(stderr.indexOf("running 3 fixtures") < stderr.indexOf("] announcements"), stderr);
+  assert.match(stderr, /^\[\d\d:\d\d\] holiday-api-client {2}previous {3}started$/m);
+  assert.match(stderr, /^\[\d\d:\d\d\] ttl-cache {11}candidate {2}started$/m);
+
+  // Roll-up first, then each fixture in listing order: two summaries and a table under a heading.
+  assert.match(stdout, /^harnessbench rollup {2}3 fixtures · code [0-9a-f]{7}\n\none run per side per fixture; counts are fixtures, names in brackets\n/);
+  assert.match(stdout, /^Turns\s+unchanged 3 \[announcements, holiday-api-client, ttl-cache\]$/m);
+  assert.match(stdout, /^warning: announcements: both sides ran the same harness/m);
+  const headings = [...stdout.matchAll(/^── (.+) ──$/gm)].map((match) => match[1]);
+  assert.deepEqual(headings, ["announcements", "holiday-api-client", "ttl-cache"]);
+  const at = (text: string): number => stdout.indexOf(text);
+  assert.ok(at("harnessbench rollup") < at("── announcements ──"), "roll-up first");
+  assert.ok(at("── announcements ──") < at("harnessbench run  announcements · previous"));
+  assert.ok(at("harnessbench run  announcements · candidate") < at("harnessbench compare  announcements"));
+  assert.ok(at("harnessbench compare  announcements") < at("── holiday-api-client ──"));
+  assert.equal(stdout.match(/^harnessbench compare /gm)?.length, 3);
+});
+
+test("--tag selects the fixtures carrying any listed tag; with ids it is the intersection; no match names both", () => {
+  const root = repoWithFake("fake-claude.sh");
+  ok(root, "run", "--tag", "http", "--tag", "performance");
+  assert.deepEqual(
+    runIds(root).map((id) => id.slice(16)),
+    ["holiday-api-client-candidate", "holiday-api-client-previous", "ttl-cache-candidate", "ttl-cache-previous"],
+  );
+
+  const both = repoWithFake("fake-claude.sh");
+  const { stderr } = ok(both, "run", "announcements", "ttl-cache", "--tag", "performance");
+  assert.deepEqual(runIds(both).map((id) => id.slice(16)), ["ttl-cache-candidate", "ttl-cache-previous"]);
+  assert.match(stderr, /^running 1 fixture × 2 sides = 2 runs: ttl-cache$/m);
+
+  const none = fails(repoWithFake("fake-claude.sh"), "run", "announcements", "--tag", "http");
+  assert.equal(none.status, 1);
+  assert.match(none.stderr, /no fixtures match fixtures announcements with tags http/);
+  assert.match(none.stderr, /available fixtures:\n\s+announcements\n\s+holiday-api-client\n\s+ttl-cache/);
+  assert.match(none.stderr, /tags in use: http, integration, performance, persistence/);
+  assert.match(fails(repoWithFake("fake-claude.sh"), "run", "--tag", "nope").stderr, /no fixtures match tags nope/);
+});
+
+test("one fixture's candidate failing setup leaves the others compared, and the error names that fixture and side", () => {
+  // The setup command sees the workspace path, which ends in the run id.
+  const root = repoWithFake("fake-claude.sh", {
+    setupCommand: 'case "$(pwd)" in *-ttl-cache-candidate/tree) echo cannot install >&2; exit 7;; esac',
+  });
+
+  const { status, stdout, stderr } = fails(root, "run");
+
+  assert.equal(status, 1);
+  assert.match(stderr, /^harnessbench: ttl-cache: candidate: setup command `case .*` exited with code 7/m);
+  assert.match(stderr, new RegExp(`the previous side ran and its record is at ${RUNS_DIR}/\\d{8}-\\d{6}-ttl-cache-previous`));
+  assert.doesNotMatch(stderr, /announcements: (previous|candidate): setup/);
+  assert.doesNotMatch(stderr, /holiday-api-client: (previous|candidate): setup/);
+
+  // Five records: the failed side has a log and no run.json.
+  const ids = runIds(root);
+  assert.equal(ids.length, 6);
+  const failed = ids.find((id) => id.endsWith("-ttl-cache-candidate")) as string;
+  assert.equal(existsSync(join(root, RUNS_DIR, failed, "run.json")), false);
+  assert.match(readFileSync(join(root, RUNS_DIR, failed, "setup.log"), "utf8"), /cannot install/);
+  for (const id of ids.filter((each) => each !== failed)) assert.equal(readRunRecord(join(root, RUNS_DIR, id)).outcome, "completed");
+
+  // The output still came: the roll-up counts the two compared fixtures, ttl-cache shows its error.
+  assert.match(stdout, /^harnessbench rollup {2}2 fixtures/);
+  assert.match(stdout, /^Turns\s+unchanged 2 \[announcements, holiday-api-client\]$/m);
+  assert.equal(stdout.match(/^harnessbench compare /gm)?.length, 2);
+  assert.match(stdout, /^── ttl-cache ──\n\nharnessbench run {2}ttl-cache · previous/m);
+  assert.match(stdout, /^error: ttl-cache: candidate: setup command/m);
+  assert.doesNotMatch(stdout, /harnessbench compare {2}ttl-cache/);
+});
+
+test("--json over several fixtures has the batch shape, a null comparison and an error for a failed fixture", () => {
+  const root = repoWithFake("fake-claude.sh", {
+    setupCommand: 'case "$(pwd)" in *-announcements-previous/tree) exit 3;; esac',
+  });
+
+  const { status, stdout } = fails(root, "run", "--json");
+
+  assert.equal(status, 1);
+  const printed = JSON.parse(stdout) as RunBatchResult;
+  assert.match(printed.stamp, /^\d{8}-\d{6}$/);
+  assert.deepEqual(printed.fixtures.map((each) => each.fixture), ["announcements", "holiday-api-client", "ttl-cache"]);
+  const [announcements, holiday, ttl] = printed.fixtures as [RunBatchResult["fixtures"][number], RunBatchResult["fixtures"][number], RunBatchResult["fixtures"][number]];
+  assert.deepEqual(announcements.records.map((record) => record.environment), ["candidate"]);
+  assert.equal(announcements.comparison, null);
+  assert.match(announcements.error ?? "", /^announcements: previous: setup command/);
+  for (const each of [holiday, ttl]) {
+    assert.deepEqual(each.records.map((record) => record.environment), ["previous", "candidate"]);
+    assert.equal(each.comparison?.fixture, each.fixture);
+    assert.equal(each.error, null);
+  }
+  assert.equal(printed.rollup.fixtures, 2);
+  assert.deepEqual(printed.rollup.rows.find((row) => row.id === "outcome")?.unchanged, ["holiday-api-client", "ttl-cache"]);
 });
 
 /** The environment for a fake that leaves marks (timestamps, pids) in a fresh directory. */
@@ -658,6 +775,16 @@ function withMarks(): { env: NodeJS.ProcessEnv; marks: string } {
 }
 
 const MARKING_AGENT = { env: ["FAKE_CLAUDE_STREAM", "FAKE_CLAUDE_MARKS"] };
+
+/** When each marked agent started and finished, by run id. */
+function intervals(marks: string): Array<{ id: string; started: number; finished: number }> {
+  const mtime = (name: string): number => statSync(join(marks, name)).mtimeMs;
+  return readdirSync(marks)
+    .filter((name) => name.endsWith(".started"))
+    .map((name) => name.slice(0, -".started".length))
+    .map((id) => ({ id, started: mtime(`${id}.started`), finished: mtime(`${id}.finished`) }))
+    .sort((a, b) => a.started - b.started);
+}
 
 test("both sides run at once, and the records still come back previous first", () => {
   const root = repoWithFake("concurrent-claude.sh", { agent: MARKING_AGENT });
@@ -670,16 +797,61 @@ test("both sides run at once, and the records still come back previous first", (
   assert.equal(result.status, 0, result.stderr);
   // Each agent sleeps 1.5 s; one after the other would take 3 s. Both start before either ends.
   assert.ok(took < 2500, `run took ${took}ms`);
-  const mtime = (name: string): number => statSync(join(marks, name)).mtimeMs;
-  const started = Math.max(mtime("previous.started"), mtime("candidate.started"));
-  const finished = Math.min(mtime("previous.finished"), mtime("candidate.finished"));
+  const sides = intervals(marks);
+  assert.equal(sides.length, 2);
+  const started = Math.max(...sides.map((side) => side.started));
+  const finished = Math.min(...sides.map((side) => side.finished));
   assert.ok(started < finished, `an agent started at ${started} after another finished at ${finished}`);
 
-  const records = JSON.parse(result.stdout) as RunRecord[];
-  assert.deepEqual(records.slice(0, 2).map((record) => record.environment), ["previous", "candidate"]);
+  const printed = JSON.parse(result.stdout) as RunBatchResult;
+  assert.deepEqual(printed.fixtures[0]?.records.map((record) => record.environment), ["previous", "candidate"]);
   const dirs = runDirs(root);
   assert.equal(readRunRecord(dirs.previous).outcome, "completed");
   assert.equal(readRunRecord(dirs.candidate).outcome, "completed");
+});
+
+test("three fixtures in one invocation share a stamp and all six sides overlap", () => {
+  const root = repoWithFake("concurrent-claude.sh", { agent: MARKING_AGENT });
+  const { env, marks } = withMarks();
+
+  const began = Date.now();
+  const result = run(env, root, "run", "--json");
+  const took = Date.now() - began;
+
+  assert.equal(result.status, 0, result.stderr);
+  // Six agents of 1.5 s each; under twice one sleep means none waited for another.
+  assert.ok(took < 3000, `run took ${took}ms`);
+  const sides = intervals(marks);
+  assert.equal(sides.length, 6, sides.map((side) => side.id).join(", "));
+  const stamps = new Set(sides.map((side) => side.id.slice(0, 15)));
+  assert.equal(stamps.size, 1);
+  const started = Math.max(...sides.map((side) => side.started));
+  const finished = Math.min(...sides.map((side) => side.finished));
+  assert.ok(started < finished, "every agent started before any finished");
+  const printed = JSON.parse(result.stdout) as RunBatchResult;
+  assert.equal(printed.fixtures.length, 3);
+  assert.ok(printed.fixtures.every((each) => each.records.length === 2 && each.comparison !== null));
+});
+
+test("--concurrency 1 runs one side at a time, in fixture order, previous before candidate", () => {
+  const root = repoWithFake("concurrent-claude.sh", { agent: MARKING_AGENT });
+  const { env, marks } = withMarks();
+
+  const result = run(env, root, "run", "ttl-cache", "announcements", "--concurrency", "1");
+
+  assert.equal(result.status, 0, result.stderr);
+  const sides = intervals(marks);
+  assert.equal(sides.length, 4);
+  for (let i = 1; i < sides.length; i++) {
+    const before = sides[i - 1] as (typeof sides)[number];
+    const after = sides[i] as (typeof sides)[number];
+    assert.ok(after.started >= before.finished, `${after.id} started before ${before.id} finished`);
+  }
+  assert.deepEqual(
+    sides.map((side) => side.id.slice(16)),
+    ["ttl-cache-previous", "ttl-cache-candidate", "announcements-previous", "announcements-candidate"],
+  );
+  assert.match(fails(root, "run", "ttl-cache", "--concurrency", "0").stderr, /--concurrency.*positive integer/);
 });
 
 test("progress goes to stderr, one line per event per side, while stdout waits for the end", () => {
@@ -688,7 +860,7 @@ test("progress goes to stderr, one line per event per side, while stdout waits f
   const { stdout, stderr } = ok(root, "run", "ttl-cache");
 
   for (const side of ["previous", "candidate"]) {
-    const line = (text: string): RegExp => new RegExp(`^\\[\\d\\d:\\d\\d\\] ${side}\\s+${text}$`, "m");
+    const line = (text: string): RegExp => new RegExp(`^\\[\\d\\d:\\d\\d\\] ttl-cache {2}${side}\\s+${text}$`, "m");
     assert.match(stderr, line("started"));
     assert.match(stderr, line("setup ok \\(echo deps, \\d+\\.\\ds\\)"));
     assert.match(stderr, line("agent completed \\(7 turns\\)"));
@@ -708,10 +880,11 @@ test("with --json, progress still goes to stderr and stdout stays pure JSON", ()
 
   const { stdout, stderr } = ok(root, "run", "ttl-cache", "--json");
 
-  assert.match(stderr, /^\[\d\d:\d\d\] previous\s+started$/m);
-  assert.match(stderr, /^\[\d\d:\d\d\] candidate\s+recorded /m);
+  assert.match(stderr, /^\[\d\d:\d\d\] ttl-cache {2}previous\s+started$/m);
+  assert.match(stderr, /^\[\d\d:\d\d\] ttl-cache {2}candidate\s+recorded /m);
+  assert.match(stderr, /^running 1 fixture × 2 sides = 2 runs: ttl-cache$/m);
   assert.doesNotMatch(stdout, /^\[\d\d:\d\d\]/m);
-  assert.equal((JSON.parse(stdout) as unknown[]).length, 3);
+  assert.deepEqual(Object.keys(JSON.parse(stdout) as object), ["stamp", "fixtures", "rollup"]);
 });
 
 /** Polls `probe` until it returns a value, or fails after `timeoutMs`. */

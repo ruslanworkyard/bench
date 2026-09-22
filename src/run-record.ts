@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { Usage } from "./agents/types.js";
@@ -115,4 +115,53 @@ export function readRunRecord(dir: string): RunRecord {
     );
   }
   return parsed as RunRecord;
+}
+
+/** `<stamp>-<fixture>-<environment>`. A `-judge` directory is not a run and never matches. */
+export const RUN_ID = /^(\d{8}-\d{6})-(.+)-(previous|candidate)$/;
+
+/**
+ * One `run` invocation: every run directory sharing a stamp, one pair per fixture. A side that
+ * is missing or unreadable is `null`, never dropped: an incomplete batch is still a batch.
+ */
+export type Batch = {
+  stamp: string;
+  /** By fixture id. */
+  pairs: Array<{ fixture: string; previous: RunRecord | null; candidate: RunRecord | null }>;
+};
+
+/** Every batch in `runsDir`, newest first, complete or not. A missing directory yields none. */
+export function listBatches(runsDir: string): Batch[] {
+  const entries = existsSync(runsDir) ? readdirSync(runsDir, { withFileTypes: true }) : [];
+  const byStamp = new Map<string, Map<string, Batch["pairs"][number]>>();
+  for (const entry of entries) {
+    const match = entry.isDirectory() ? RUN_ID.exec(entry.name) : null;
+    if (match === null) continue;
+    const [, stamp, fixture, environment] = match as unknown as [string, string, string, Environment];
+    const pairs = byStamp.get(stamp) ?? new Map();
+    byStamp.set(stamp, pairs);
+    const pair = pairs.get(fixture) ?? { fixture, previous: null, candidate: null };
+    pairs.set(fixture, pair);
+    pair[environment] = readSide(join(runsDir, entry.name));
+  }
+  return [...byStamp.entries()]
+    .sort(([a], [b]) => b.localeCompare(a))
+    .map(([stamp, pairs]) => ({
+      stamp,
+      pairs: [...pairs.values()].sort((a, b) => a.fixture.localeCompare(b.fixture)),
+    }));
+}
+
+/** The newest batch, or the newest one `filter` accepts; null when there is none. */
+export function latestBatch(runsDir: string, filter: (batch: Batch) => boolean = () => true): Batch | null {
+  return listBatches(runsDir).find(filter) ?? null;
+}
+
+function readSide(dir: string): RunRecord | null {
+  try {
+    return readRunRecord(dir);
+  } catch (error) {
+    if (error instanceof CliError) return null;
+    throw error;
+  }
 }

@@ -25,9 +25,18 @@ import {
   requireRepo,
   type ResolvedJudge,
 } from "../preflight.js";
-import { formatComparison, formatJudging } from "../print.js";
-import { runStamp, type Environment, type RunRecord } from "../run-record.js";
-import { RUN_ID, findJudgeRecord, loadJudgement, loadPair } from "./compare.js";
+import { formatBatch, formatComparison, formatJudging, type BatchFixtureReport } from "../print.js";
+import { RUN_ID, runStamp, type Environment, type RunRecord } from "../run-record.js";
+import {
+  compareBatchRecords,
+  findJudgeRecord,
+  headShaOf,
+  loadBatch,
+  loadJudgement,
+  loadPair,
+  orderPair,
+  type BatchComparison,
+} from "./compare.js";
 
 /**
  * Pairwise verdicts on one previous/candidate pair: every configured judge, in order, each
@@ -90,6 +99,70 @@ export async function judge(options: JudgeOptions, deps: JudgeDeps = defaultDeps
   if (options.json) console.log(JSON.stringify(comparison, null, 2));
   else console.log(`${formatJudging(result)}\n\n${formatComparison(comparison)}`);
   return result.record;
+}
+
+export type JudgeBatchOptions = {
+  cwd: string;
+  /** The batch with this stamp; when absent, the latest batch with at least one complete pair. */
+  stamp?: string | undefined;
+  json: boolean;
+  all: boolean;
+};
+
+/** A judged batch: the compared batch plus, per fixture, what judging did or why it was skipped. */
+export type JudgeBatchResult = Omit<BatchComparison, "fixtures"> & {
+  fixtures: Array<BatchComparison["fixtures"][number] & { judging: JudgePairResult | null }>;
+};
+
+/**
+ * Every complete pair of a batch judged at once, each as `judgePair` would alone, then the
+ * batch's tables under their roll-up. A pair with a missing side, or one a judge refuses, is
+ * listed as skipped with the reason; it never stops the others.
+ */
+export async function judgeBatch(options: JudgeBatchOptions, deps: JudgeDeps = defaultDeps): Promise<JudgeBatchResult> {
+  requireGit();
+  const root = requireRepo(options.cwd);
+  const config = requireConfig(root);
+  const batch = loadBatch(root, options.stamp);
+
+  const settled = await Promise.allSettled(
+    batch.pairs.map(async (pair): Promise<JudgePairResult | null> => {
+      if (pair.previous === null || pair.candidate === null) return null;
+      const [previous, candidate] = orderPair([pair.previous, pair.candidate]);
+      return judgePair(root, config, previous, candidate, deps, options.all);
+    }),
+  );
+  const unexpected = settled.find((each) => each.status === "rejected" && !(each.reason instanceof CliError));
+  if (unexpected !== undefined) throw (unexpected as PromiseRejectedResult).reason;
+  // Nothing judged at all is the refusal a single pair gets, with every pair's reason.
+  if (!settled.some((each) => each.status === "fulfilled" && each.value !== null)) {
+    const reasons = settled.flatMap((each, i) =>
+      each.status === "rejected" ? [`${batch.pairs[i]?.fixture}: ${(each.reason as CliError).message}`] : [],
+    );
+    throw new CliError(reasons.join("\n"), 1);
+  }
+
+  // The tables read what judging just wrote; a pair that was skipped keeps whatever it had.
+  const compared = compareBatchRecords(root, config, batch);
+  const fixtures = compared.fixtures.map((each, i) => {
+    const outcome = settled[i] as PromiseSettledResult<JudgePairResult | null>;
+    const judging = outcome.status === "fulfilled" ? outcome.value : null;
+    const refusal = outcome.status === "rejected" ? `judging skipped: ${(outcome.reason as CliError).message}` : null;
+    return { ...each, judging, error: each.error ?? refusal };
+  });
+  const result: JudgeBatchResult = { ...compared, fixtures };
+
+  if (options.json) console.log(JSON.stringify(result, null, 2));
+  else {
+    const reports: BatchFixtureReport[] = fixtures.map(({ fixture, judging, comparison, error }) => ({
+      fixture,
+      ...(judging === null ? {} : { judging }),
+      comparison,
+      error,
+    }));
+    console.log(formatBatch(result.rollup, reports, headShaOf(result)));
+  }
+  return result;
 }
 
 /**
