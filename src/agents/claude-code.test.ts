@@ -27,7 +27,9 @@ import { claudeCode } from "./claude-code.js";
 const hosts: string[] = [];
 const scratches: string[] = [];
 const workspaces: Workspace[] = [];
-const OWN_ENV = ["FAKE_CLAUDE_STREAM", "FAKE_CLAUDE_DUMP", "ANTHROPIC_API_KEY", "LEAKED_SECRET"];
+const OWN_ENV = ["FAKE_CLAUDE_STREAM", "FAKE_CLAUDE_DUMP", "FAKE_CLAUDE_SLEEP", "ANTHROPIC_API_KEY", "LEAKED_SECRET"];
+/** The hanging agent's sleep, unique to this process: another copy of the suite has its own. */
+const HANG = `3137.${process.pid}`;
 let runIds = 0;
 
 const GIT_ENV = {
@@ -203,19 +205,20 @@ test("no model means no settings file and no --model", async () => {
 test("an agent that hangs is a timeout, and leaves nothing behind", async () => {
   const ws = await workspace();
   const scratch = tempDir("harnessbench-agent-out-");
+  process.env.FAKE_CLAUDE_SLEEP = HANG;
 
   const result = await claudeCode.run({
     workspace: ws,
     prompt: "Go.\n",
     rawOutputPath: join(scratch, "raw.jsonl"),
     stderrPath: join(scratch, "agent.stderr.log"),
-    config: config({ command: fixture("slow-claude.sh"), timeoutMinutes: 0.01 }),
+    config: config({ command: fixture("slow-claude.sh"), timeoutMinutes: 0.01, env: ["FAKE_CLAUDE_SLEEP"] }),
   });
 
   assert.equal(result.outcome, "timeout");
   assert.equal(result.exitCode, null);
   assert.ok(result.durationMs >= 500 && result.durationMs < 10_000, `${result.durationMs}ms`);
-  assert.equal(running("sleep 3137"), false);
+  assert.equal(running(`sleep ${HANG}`), false);
   assert.deepEqual(result.transcript, [
     { thread: "main", at: result.durationMs, type: "error", message: "timed out after 0.01 minutes" },
   ]);

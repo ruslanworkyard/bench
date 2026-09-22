@@ -1,6 +1,6 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
-import { chmod, mkdir, readdir, realpath, rm, rmdir, writeFile } from "node:fs/promises";
+import { rmSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, readdir, realpath, rm, rmdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { promisify } from "node:util";
@@ -24,7 +24,7 @@ export type WorkspaceOptions = {
   repoRoot: string;
   /** A branch name, or any commit-ish (a sha, a tag) to check out detached. */
   ref: string;
-  /** Names the workspace directory under $TMPDIR/harnessbench, so runs never collide. */
+  /** Prefixes the workspace directory name under $TMPDIR/harnessbench; a random suffix follows. */
   runId: string;
   /** Commits to clone; 0 means the whole history, hardlinked from the host. */
   depth?: number;
@@ -47,11 +47,18 @@ export type ExecResult = {
   durationMs: number;
 };
 
-/** A throwaway clone of the host repository, plus an empty HOME, for one run. */
+/** A throwaway clone of the host repository, plus an empty HOME and TMPDIR, for one run. */
 export class Workspace {
   readonly dir: string;
   readonly tree: string;
   readonly home: string;
+  /**
+   * The `TMPDIR` of every command the workspace runs, and so of everything they spawn: setup,
+   * the agent, the test suite. Two workspaces therefore cannot see each other's scratch files,
+   * which is why a host project's own tests can run concurrently without being concurrency-safe
+   * about temp paths, as long as they respect `TMPDIR`. It goes with the workspace on destroy.
+   */
+  readonly tmp: string;
   readonly headSha: string;
   /** The commands `exec` has running right now; each is the leader of its own process group. */
   private readonly children = new Set<ChildProcess>();
@@ -60,6 +67,7 @@ export class Workspace {
     this.dir = dir;
     this.tree = join(dir, "tree");
     this.home = join(dir, "home");
+    this.tmp = join(dir, "tmp");
     this.headSha = headSha;
   }
 
@@ -69,7 +77,7 @@ export class Workspace {
     return new Promise((resolve, reject) => {
       const child = spawn("bash", ["-c", cmd], {
         cwd: this.tree,
-        env: { ...runEnv(this.home), ...options.env },
+        env: { ...runEnv(this.home, this.tmp), ...options.env },
         // Its own process group, so a timeout can take the whole tree of children with it.
         detached: true,
         stdio: ["pipe", "pipe", "pipe"],
@@ -192,17 +200,17 @@ export async function createWorkspace(options: WorkspaceOptions): Promise<Worksp
   const { repoRoot, ref, runId, depth = 1 } = options;
 
   // Resolved, because on macOS $TMPDIR is a symlink and a process's own cwd is not.
-  const dir = join(await realpath(tmpdir()), "harnessbench", runId);
+  const parent = join(await realpath(tmpdir()), "harnessbench");
+  await mkdir(parent, { recursive: true });
+  // The run id only prefixes the name: ids have one-second resolution, so two invocations in
+  // the same second, or a run inside a run, would otherwise land on the same directory.
+  const dir = await mkdtemp(join(parent, `${runId}-`));
   const tree = join(dir, "tree");
   const home = join(dir, "home");
+  const tmp = join(dir, "tmp");
   const hooks = join(dir, "no-hooks");
-  if (existsSync(dir)) {
-    throw new CliError(
-      `workspace ${dir} already exists (left by --keep, or a run started this second?) - ` +
-        `remove it, or run again`,
-    );
-  }
   await mkdir(home, { recursive: true });
+  await mkdir(tmp, { recursive: true });
   await mkdir(hooks, { recursive: true });
 
   const branch = await localBranch(repoRoot, ref);
@@ -257,10 +265,14 @@ async function removeEmptyParents(tree: string, path: string): Promise<void> {
   }
 }
 
-function runEnv(home: string): NodeJS.ProcessEnv {
+function runEnv(home: string, tmp: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     PATH: process.env.PATH ?? "",
     HOME: home,
+    // All three, because which one a tool reads depends on the tool and the platform.
+    TMPDIR: tmp,
+    TMP: tmp,
+    TEMP: tmp,
     TERM: "dumb",
   };
   if (process.env.LANG !== undefined) env.LANG = process.env.LANG;

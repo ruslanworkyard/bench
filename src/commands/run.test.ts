@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 
@@ -317,7 +317,7 @@ test("on a branch, the previous side runs the merge-base harness on the branch's
   const kept = [...stderr.matchAll(/^workspace kept at (.+)$/gm)].map((match) => match[1] as string);
   assert.equal(kept.length, 2, stderr);
   const tree = (environment: Environment): string => {
-    const dir = kept.find((path) => path.endsWith(`-${environment}`));
+    const dir = kept.find((path) => new RegExp(`-${environment}-[^/]+$`).test(path));
     assert.ok(dir !== undefined, `no kept workspace for ${environment} in: ${kept.join(", ")}`);
     return join(dir, "tree");
   };
@@ -520,20 +520,21 @@ test("--keep leaves the workspace behind and says where; without it the workspac
   assert.equal(workspaces.length, 2, stderr);
   const dirs = runDirs(kept);
   for (const environment of ["previous", "candidate"] as const) {
-    // Whichever side finished first printed first; each path ends in its own run id.
+    // Whichever side finished first printed first; each path is named for its own run id.
     const runId = readRunRecord(dirs[environment]).runId;
-    const workspace = workspaces.find((path) => path.endsWith(runId));
+    const workspace = workspaces.find((path) => basename(path).startsWith(`${runId}-`));
     assert.ok(workspace !== undefined, `no kept workspace for ${runId} in: ${workspaces.join(", ")}`);
     assert.ok(existsSync(join(workspace, "tree", "agent-was-here.txt")), workspace);
-    // Run ids have one-second resolution: a kept workspace would collide with the next run.
+    // Nothing else can collide with it now, but a kept workspace is still litter.
     rmSync(workspace, { recursive: true, force: true });
   }
 
-  const dropped = repoWithFake("fake-claude.sh");
+  // The setup command prints the tree it ran in, so each side names its own workspace.
+  const dropped = repoWithFake("fake-claude.sh", { setupCommand: "pwd" });
   ok(dropped, "run", "ttl-cache");
   for (const dir of Object.values(runDirs(dropped))) {
-    const runId = readRunRecord(dir).runId;
-    assert.equal(existsSync(join(realpathSync(tmpdir()), "harnessbench", runId)), false);
+    const tree = readFileSync(join(dir, "setup.log"), "utf8").trim();
+    assert.equal(existsSync(dirname(tree)), false, tree);
   }
 });
 
@@ -714,9 +715,9 @@ test("--tag selects the fixtures carrying any listed tag; with ids it is the int
 });
 
 test("one fixture's candidate failing setup leaves the others compared, and the error names that fixture and side", () => {
-  // The setup command sees the workspace path, which ends in the run id.
+  // The setup command sees the workspace path: the run id, then mkdtemp's unique suffix.
   const root = repoWithFake("fake-claude.sh", {
-    setupCommand: 'case "$(pwd)" in *-ttl-cache-candidate/tree) echo cannot install >&2; exit 7;; esac',
+    setupCommand: 'case "$(pwd)" in *-ttl-cache-candidate-*/tree) echo cannot install >&2; exit 7;; esac',
   });
 
   const { status, stdout, stderr } = fails(root, "run");
@@ -746,7 +747,7 @@ test("one fixture's candidate failing setup leaves the others compared, and the 
 
 test("--json over several fixtures has the batch shape, a null comparison and an error for a failed fixture", () => {
   const root = repoWithFake("fake-claude.sh", {
-    setupCommand: 'case "$(pwd)" in *-announcements-previous/tree) exit 3;; esac',
+    setupCommand: 'case "$(pwd)" in *-announcements-previous-*/tree) exit 3;; esac',
   });
 
   const { status, stdout } = fails(root, "run", "--json");
@@ -848,7 +849,8 @@ test("--concurrency 1 runs one side at a time, in fixture order, previous before
     assert.ok(after.started >= before.finished, `${after.id} started before ${before.id} finished`);
   }
   assert.deepEqual(
-    sides.map((side) => side.id.slice(16)),
+    // The mark is named for the workspace: the stamp, the fixture and side, mkdtemp's suffix.
+    sides.map((side) => side.id.slice(16).replace(/-[^-]+$/, "")),
     ["ttl-cache-previous", "ttl-cache-candidate", "announcements-previous", "announcements-candidate"],
   );
   assert.match(fails(root, "run", "ttl-cache", "--concurrency", "0").stderr, /--concurrency.*positive integer/);
@@ -910,7 +912,7 @@ function alive(pid: number): boolean {
 /**
  * Starts a run whose agents write their pids and then hang, waits until both are running, and
  * sends the CLI the signal a terminal's Ctrl-C would. Returns what the CLI did, the agents'
- * pids, and the workspace directories the run ids name.
+ * pids, and the workspace directories they ran in.
  */
 async function interrupt(
   ...args: string[]
@@ -944,6 +946,7 @@ async function interrupt(
   // A killed process is a zombie until its parent reaps it; the CLI's exit hands them to init.
   await until("the agents to be gone", () => (agents.pids.some(alive) ? null : true), 5_000);
 
+  // Each pid file is named for the workspace directory the agent ran in, suffix and all.
   const workspaces = agents.files.map((name) => join(realpathSync(tmpdir()), "harnessbench", name.replace(/\.pid$/, "")));
   return { status, stderr, pids: agents.pids, workspaces };
 }

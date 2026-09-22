@@ -12,11 +12,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { after, test } from "node:test";
 
 import { harnessSnapshot, type HarnessSnapshot } from "./detect/harness.js";
-import { CliError } from "./errors.js";
 import { abortAll, createWorkspace, liveWorkspaces, withWorkspace, type Workspace } from "./workspace.js";
 
 const hosts: string[] = [];
@@ -108,6 +107,11 @@ async function output(ws: Workspace, cmd: string): Promise<string> {
   return stdout;
 }
 
+/** A sleep duration no other process — another copy of this suite included — will be using. */
+function sleeping(marker: number): string {
+  return `sleep ${marker}.${process.pid}`;
+}
+
 function running(pattern: string): boolean {
   try {
     execFileSync("pgrep", ["-f", pattern], { stdio: "ignore" });
@@ -139,19 +143,36 @@ test("a shallow clone of HEAD, with the host left alone", async () => {
   assert.equal(git(root, "worktree", "list").split("\n").length, 1);
 });
 
-test("a workspace whose directory already exists is refused, naming it", async () => {
+test("two workspaces with the same run id get different directories", async () => {
   const root = host();
   const runId = `test-${process.pid}-${runIds++}`;
+
   const first = await createWorkspace({ repoRoot: root, ref: "main", runId });
   workspaces.push(first);
+  const second = await createWorkspace({ repoRoot: root, ref: "main", runId });
+  workspaces.push(second);
 
-  await assert.rejects(
-    createWorkspace({ repoRoot: root, ref: "main", runId }),
-    (error: unknown) =>
-      error instanceof CliError &&
-      error.message.includes(first.dir) &&
-      /already exists.*--keep/.test(error.message),
-  );
+  assert.notEqual(first.dir, second.dir);
+  assert.equal(dirname(first.dir), dirname(second.dir));
+  for (const ws of [first, second]) {
+    assert.equal(basename(ws.dir).startsWith(`${runId}-`), true, ws.dir);
+    assert.equal(existsSync(join(ws.tree, "file.txt")), true);
+  }
+});
+
+test("a command sees a TMPDIR of its own, inside the workspace", async () => {
+  const ws = await workspace(host(), "main");
+
+  const seen = await output(ws, 'echo "tmpdir=$TMPDIR"; echo "tmp=$TMP"; echo "temp=$TEMP"');
+
+  for (const line of ["tmpdir", "tmp", "temp"]) {
+    assert.match(seen, new RegExp(`^${line}=${ws.tmp}$`, "m"));
+  }
+  assert.equal(ws.tmp, join(ws.dir, "tmp"));
+  assert.equal(existsSync(ws.tmp), true);
+  // A file the command leaves there is inside the workspace, and goes with it.
+  await output(ws, 'printf scratch > "$TMPDIR/note.txt"');
+  assert.equal(readFileSync(join(ws.tmp, "note.txt"), "utf8"), "scratch");
 });
 
 test("depth 0 clones the whole history", async () => {
@@ -190,10 +211,10 @@ test("exec propagates the exit code and hides the host environment", async () =>
 test("a timeout kills the whole process group", async () => {
   const ws = await workspace(host(), "main");
 
-  const result = await ws.exec("sleep 3133 & wait", { timeoutMs: 500 });
+  const result = await ws.exec(`${sleeping(3133)} & wait`, { timeoutMs: 500 });
 
   assert.equal(result.timedOut, true);
-  assert.equal(running("sleep 3133"), false);
+  assert.equal(running(sleeping(3133)), false);
   assert.ok(result.durationMs < 10_000, `took ${result.durationMs}ms`);
 });
 
@@ -300,7 +321,7 @@ test("rebaseline leaves one clean commit, so diff sees only what comes after", a
 
 test("abortAll kills every running command's group and removes the live workspaces", async () => {
   const ws = await workspace(host(), "main");
-  const command = ws.exec("sleep 3139 & wait");
+  const command = ws.exec(`${sleeping(3139)} & wait`);
   await new Promise((resolve) => setTimeout(resolve, 200));
   assert.ok(liveWorkspaces() >= 1);
 
@@ -311,12 +332,12 @@ test("abortAll kills every running command's group and removes the live workspac
   assert.equal(liveWorkspaces(), 0);
   const result = await command;
   assert.equal(result.exitCode, null);
-  assert.equal(running("sleep 3139"), false);
+  assert.equal(running(sleeping(3139)), false);
 });
 
 test("abortAll with keep kills the commands but leaves the directories", async () => {
   const ws = await workspace(host(), "main");
-  const command = ws.exec("sleep 3141 & wait");
+  const command = ws.exec(`${sleeping(3141)} & wait`);
   await new Promise((resolve) => setTimeout(resolve, 200));
 
   const paths = abortAll({ keep: true });
@@ -325,5 +346,5 @@ test("abortAll with keep kills the commands but leaves the directories", async (
   assert.ok(existsSync(ws.dir));
   assert.equal(liveWorkspaces(), 0);
   assert.equal((await command).exitCode, null);
-  assert.equal(running("sleep 3141"), false);
+  assert.equal(running(sleeping(3141)), false);
 });
