@@ -38,7 +38,14 @@ test("a config without setupCommand loads as no setup; with it, the command roun
 
 test("a config without a judge block loads with the judge defaults; a full block round-trips", () => {
   const older = validate({ baseBranch: "main", testCommand: "npm test" });
-  assert.deepEqual(older.judge, { provider: "anthropic", model: "", apiKeyEnv: "", baseUrl: "", maxContextKb: 512 });
+  assert.deepEqual(older.judge, {
+    provider: "anthropic",
+    model: "",
+    apiKeyEnv: "",
+    baseUrl: "",
+    structuredOutputs: true,
+    maxContextKb: 512,
+  });
   assert.deepEqual(older.judges, ["code-quality", "engineering-practices", "test-quality"]);
 
   const judge = {
@@ -46,6 +53,7 @@ test("a config without a judge block loads with the judge defaults; a full block
     model: "llama-3.3-70b",
     apiKeyEnv: "LOCAL_KEY",
     baseUrl: "http://localhost:11434/v1",
+    structuredOutputs: false,
     maxContextKb: 64,
   };
   assert.deepEqual(validate({ judge, judges: ["code-quality"] }).judge, judge);
@@ -58,6 +66,7 @@ test("the judge block's types are checked", () => {
   rejects({ judge: { provider: "bedrock" } }, /"judge\.provider" must be one of anthropic, openai, google, openai-compatible, found "bedrock"/);
   rejects({ judge: { model: null } }, /"judge\.model" must be a string, found null/);
   rejects({ judge: { maxContextKb: 0 } }, /"judge\.maxContextKb" must be a positive number/);
+  rejects({ judge: { structuredOutputs: "yes" } }, /"judge\.structuredOutputs" must be true or false, found a string/);
   rejects({ judge: { baseURL: "x" } }, /unknown key "judge\.baseURL"/);
   rejects({ judges: "code-quality" }, /"judges" must be an array of strings/);
 });

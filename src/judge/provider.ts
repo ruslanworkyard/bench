@@ -21,8 +21,12 @@ export function judgeModel(target: ResolvedJudge, env: NodeJS.ProcessEnv = proce
     case "google":
       return createGoogle({ apiKey })(target.model);
     case "openai-compatible":
-      return createOpenAICompatible({ name: "openai-compatible", baseURL: target.baseUrl, apiKey })(
-        target.model,
-      );
+      // Off by default in the SDK, which then drops the schema and only hints at JSON.
+      return createOpenAICompatible({
+        name: "openai-compatible",
+        baseURL: target.baseUrl,
+        apiKey,
+        supportsStructuredOutputs: target.structuredOutputs,
+      })(target.model);
   }
 }

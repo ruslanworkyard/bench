@@ -187,6 +187,8 @@ export type ResolvedJudge = {
   /** The variable the key is read from at call time. Only its name lives here. */
   apiKeyEnv: string;
   baseUrl: string;
+  /** openai-compatible only: whether to ask the endpoint to hold the reply to the schema. */
+  structuredOutputs: boolean;
 };
 
 /**
@@ -228,7 +230,7 @@ export function requireJudgeModel(
   }
 
   const apiKeyEnv = judge.meta.apiKeyEnv || judgeKeyEnv(config, provider);
-  return { provider, model, apiKeyEnv, baseUrl: config.baseUrl };
+  return { provider, model, apiKeyEnv, baseUrl: config.baseUrl, structuredOutputs: config.structuredOutputs };
 }
 
 /** The key stays in the environment: this checks only that the variable is set. */

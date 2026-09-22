@@ -10,11 +10,12 @@ function next(): number {
   clock += 100;
   return clock;
 }
+let turns = 0;
 
 const USAGE: Usage = { input: 10, output: 5, cacheRead: 100, cacheWrite: 1 };
 
-function said(thread: string, model = "claude-opus-5", usage: Usage | null = USAGE): TranscriptEvent {
-  return { thread, at: next(), type: "assistant", text: "...", model, usage };
+function said(thread: string, model = "claude-opus-5", usage: Usage | null = USAGE, turn = turns++): TranscriptEvent {
+  return { thread, at: next(), type: "assistant", turn, text: "...", model, usage };
 }
 
 function call(thread: string, id: string, tool: string, kind: ToolKind, path: string | null = null): TranscriptEvent {
@@ -31,6 +32,7 @@ function result(thread: string, id: string, isError = false): TranscriptEvent {
  */
 function run(): TranscriptEvent[] {
   clock = 0;
+  turns = 0;
   return [
     said("main"),
     call("main", "r1", "Read", "read", "a.ts"),
@@ -147,6 +149,24 @@ test("a first write on the sub-agent thread starts building, but not main's edit
   assert.equal(t.filesWritten, 2);
   assert.equal(t.subAgents[0]?.tool, "Agent");
   assert.equal(t.subAgents[0]?.model, "claude-sonnet-5");
+});
+
+test("several assistant events with the same turn are one turn, before the first edit too", () => {
+  clock = 0;
+  const events: TranscriptEvent[] = [
+    said("main", "claude-opus-5", USAGE, 0),
+    said("main", "claude-opus-5", USAGE, 0), // the tool-use block of the same message
+    call("main", "w1", "Edit", "write", "a.ts"),
+    result("main", "w1"),
+    said("main", "claude-opus-5", USAGE, 1),
+    said("main", "claude-opus-5", USAGE, 1),
+  ];
+
+  const t = telemetry(events, 1000);
+  assert.equal(t.main.turns, 2);
+  assert.equal(t.turnsBeforeFirstEdit, 1);
+  // Tokens still sum over every event, as the stream reports them.
+  assert.deepEqual(t.main.tokens, { input: 40, output: 20, cacheRead: 400, cacheWrite: 4 });
 });
 
 test("a thread with no spawning call is still reported, as unknown", () => {

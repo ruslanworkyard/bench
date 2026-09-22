@@ -75,6 +75,7 @@ The config it writes is small and meant to be edited by hand:
     "model": "",
     "apiKeyEnv": "",
     "baseUrl": "",
+    "structuredOutputs": true,
     "maxContextKb": 512
   },
   "judges": ["code-quality", "engineering-practices", "test-quality"]
@@ -200,7 +201,7 @@ To write your own, add a directory with a `judge.json` and the rubric it points 
 
 The two sides are shown to the model as **A** and **B**, in a fixed layout: the task once, then every other item for A, then for B. `previous` is always A and `candidate` always B. The mapping is fixed rather than swapped on purpose: if the model has a first-position tilt, it favours the incumbent, so a `candidate preferred` verdict has cleared that bar. The words previous and candidate, the run ids and the harness hashes never appear in what the judge reads; the mapping is recorded in the output so nobody has to remember it. Every verdict is translated back to `previous preferred`, `candidate preferred` or `tie` before it is stored.
 
-The `judge` block of the config chooses the model: `provider` is one of `anthropic`, `openai`, `google` or `openai-compatible` (with `baseUrl`), and `model` is required and written empty by `init`, so the choice is yours; `judge` refuses until it is made. `HARNESSBENCH_JUDGE_PROVIDER` and `HARNESSBENCH_JUDGE_MODEL` override both the config and any `judge.json` for one invocation. The API key is read from the provider's conventional variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`) or from the one `apiKeyEnv` names, at call time; it is never stored, logged or printed, and the only check before judging is that the variable is set.
+The `judge` block of the config chooses the model: `provider` is one of `anthropic`, `openai`, `google` or `openai-compatible` (with `baseUrl`), and `model` is required and written empty by `init`, so the choice is yours; `judge` refuses until it is made. `HARNESSBENCH_JUDGE_PROVIDER` and `HARNESSBENCH_JUDGE_MODEL` override both the config and any `judge.json` for one invocation. The API key is read from the provider's conventional variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`) or from the one `apiKeyEnv` names, at call time; it is never stored, logged or printed, and the only check before judging is that the variable is set. `structuredOutputs` (default `true`) makes the `openai-compatible` provider ask the endpoint to hold the reply to the verdict schema; set it to `false` for an endpoint that rejects `response_format`.
 
 `judge` refuses, before any model is called, when either side did not complete (a run cut off by the turn limit is not a finished attempt), when the two records are not a valid pair, when no model is set or the key variable is unset, and when any context item on either side is over `maxContextKb` (512 KB by default). Nothing is ever truncated: a fixture that produces more output than a judge can read is a fixture to narrow, or a diff to keep generated paths out of. With `run --judge`, a refusal is one `judging skipped: …` line on stderr and the run's own exit code.
 

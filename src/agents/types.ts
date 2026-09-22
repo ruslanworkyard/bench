@@ -56,11 +56,14 @@ type EventBase = {
 /**
  * The normalised transcript: the same shape for every adapter, so everything derived from
  * it (telemetry, later the judge) is written once. One `assistant` event per assistant
- * message, even one that only calls tools, so its model and usage are never lost.
+ * message, even one that only calls tools, so its model and usage are never lost. A stream
+ * that splits one model response over several events gives them all the same `turn`.
  */
 export type TranscriptEvent =
   | (EventBase & {
       type: "assistant";
+      /** Which model response this came from, as the adapter numbers them; telemetry counts distinct values. */
+      turn: number;
       text: string;
       model: string | null;
       /** This message's own usage, as the stream reports it per message; null when absent. */

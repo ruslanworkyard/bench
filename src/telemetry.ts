@@ -7,7 +7,7 @@ import { MAIN_THREAD, type TranscriptEvent, type Usage } from "./agents/types.js
  */
 
 export type ThreadStats = {
-  /** Assistant messages on this thread. */
+  /** Model responses on this thread: distinct `turn` values, the meaning `RunRecord.turns` has. */
   turns: number;
   toolCalls: number;
   toolFailures: number;
@@ -76,6 +76,7 @@ export function telemetry(events: TranscriptEvent[], durationMs: number): Teleme
   const stats = (thread: string): ThreadStats =>
     byThread.get(thread) ?? subAgent(thread, "unknown");
 
+  const seenTurns = new Map<string, Set<number>>();
   let mainHasWritten = false;
   let readsBeforeFirstEdit = 0;
   let turnsBeforeFirstEdit = 0;
@@ -92,13 +93,17 @@ export function telemetry(events: TranscriptEvent[], durationMs: number): Teleme
     switch (event.type) {
       case "assistant": {
         const thread = stats(event.thread);
-        thread.turns++;
+        let turns = seenTurns.get(event.thread);
+        if (turns === undefined) seenTurns.set(event.thread, (turns = new Set()));
+        const newTurn = !turns.has(event.turn);
+        turns.add(event.turn);
+        if (newTurn) thread.turns++;
         if (event.usage !== null) add(thread.tokens, event.usage);
         if (!onMain) {
           const sub = thread as SubAgentStats;
           if (sub.model === null) sub.model = event.model;
         }
-        if (onMain && !mainHasWritten) turnsBeforeFirstEdit++;
+        if (newTurn && onMain && !mainHasWritten) turnsBeforeFirstEdit++;
         break;
       }
       case "tool_call": {

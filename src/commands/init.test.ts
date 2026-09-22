@@ -96,7 +96,7 @@ test("init sets up a repository, and a second run changes nothing", () => {
       env: [],
     },
     harness: { extraPaths: [] },
-    judge: { provider: "anthropic", model: "", apiKeyEnv: "", baseUrl: "", maxContextKb: 512 },
+    judge: { provider: "anthropic", model: "", apiKeyEnv: "", baseUrl: "", structuredOutputs: true, maxContextKb: 512 },
     judges: ["code-quality", "engineering-practices", "test-quality"],
   });
 

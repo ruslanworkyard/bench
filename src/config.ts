@@ -46,6 +46,11 @@ export type JudgeConfig = {
   apiKeyEnv: string;
   /** openai-compatible only: where the server is. */
   baseUrl: string;
+  /**
+   * openai-compatible only: ask the endpoint to hold the reply to the verdict schema
+   * (`response_format`). Off for an endpoint that rejects it; the other providers always do.
+   */
+  structuredOutputs: boolean;
   /** Per context item, per side: a bigger item is refused, never truncated. */
   maxContextKb: number;
 };
@@ -63,7 +68,7 @@ export type Config = {
 };
 
 const TOP_KEYS = ["baseBranch", "testCommand", "setupCommand", "agent", "harness", "judge", "judges"] as const;
-const JUDGE_KEYS = ["provider", "model", "apiKeyEnv", "baseUrl", "maxContextKb"] as const;
+const JUDGE_KEYS = ["provider", "model", "apiKeyEnv", "baseUrl", "structuredOutputs", "maxContextKb"] as const;
 const AGENT_KEYS = [
   "name",
   "command",
@@ -95,6 +100,7 @@ export function defaults(): Config {
       model: "",
       apiKeyEnv: "",
       baseUrl: "",
+      structuredOutputs: true,
       maxContextKb: DEFAULT_MAX_CONTEXT_KB,
     },
     judges: [...DEFAULT_JUDGES],
@@ -145,6 +151,13 @@ function nullableString(
   if (field === undefined) return undefined;
   if (field === null) return null;
   if (typeof field !== "string") fail(`${where} must be a string or null, found ${describe(field)}`);
+  return field;
+}
+
+function booleanField(raw: Record<string, unknown>, key: string, where: string): boolean | undefined {
+  const field = raw[key];
+  if (field === undefined) return undefined;
+  if (typeof field !== "boolean") fail(`${where} must be true or false, found ${describe(field)}`);
   return field;
 }
 
@@ -204,6 +217,8 @@ function validateJudge(value: unknown, judge: JudgeConfig): void {
   judge.model = stringField(raw, "model", '"judge.model"') ?? judge.model;
   judge.apiKeyEnv = stringField(raw, "apiKeyEnv", '"judge.apiKeyEnv"') ?? judge.apiKeyEnv;
   judge.baseUrl = stringField(raw, "baseUrl", '"judge.baseUrl"') ?? judge.baseUrl;
+  judge.structuredOutputs =
+    booleanField(raw, "structuredOutputs", '"judge.structuredOutputs"') ?? judge.structuredOutputs;
   judge.maxContextKb =
     positiveNumber(raw, "maxContextKb", '"judge.maxContextKb"') ?? judge.maxContextKb;
 }

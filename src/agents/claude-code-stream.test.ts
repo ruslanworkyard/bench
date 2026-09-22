@@ -34,8 +34,8 @@ test("a complete run parses into every field of a result", () => {
   // One assistant event per message, even one that only calls a tool: its usage lives there.
   const main = { thread: "main", at: 0 };
   assert.deepEqual(parsed.transcript, [
-    { ...main, type: "assistant", text: "I'll read the cache module before changing it.", model: "claude-opus-5", usage: null },
-    { ...main, type: "assistant", text: "", model: "claude-opus-5", usage: null },
+    { ...main, type: "assistant", turn: 0, text: "I'll read the cache module before changing it.", model: "claude-opus-5", usage: null },
+    { ...main, type: "assistant", turn: 1, text: "", model: "claude-opus-5", usage: null },
     { ...main, type: "tool_call", id: "toolu_01", tool: "Read", input: { file_path: "src/cache.ts" }, kind: "read", path: "src/cache.ts" },
     {
       ...main,
@@ -44,7 +44,7 @@ test("a complete run parses into every field of a result", () => {
       isError: false,
       output: "export function get(key: string) {\n  return store.get(key);\n}\n",
     },
-    { ...main, type: "assistant", text: "", model: "claude-opus-5", usage: null },
+    { ...main, type: "assistant", turn: 2, text: "", model: "claude-opus-5", usage: null },
     {
       ...main,
       type: "tool_call",
@@ -55,7 +55,7 @@ test("a complete run parses into every field of a result", () => {
       path: null,
     },
     { ...main, type: "tool_result", id: "toolu_02", isError: true, output: 'npm ERR! Missing script: "test"' },
-    { ...main, type: "assistant", text: "The suite has no test script.", model: "claude-opus-5", usage: null },
+    { ...main, type: "assistant", turn: 3, text: "The suite has no test script.", model: "claude-opus-5", usage: null },
   ]);
 });
 
@@ -101,6 +101,7 @@ test("a sub-agent's events carry its thread, and the last of two results wins", 
     thread: "main",
     at: 100,
     type: "assistant",
+    turn: 0,
     text: "Let me have a sub-agent map the cache module.",
     model: "claude-opus-5",
     usage: { input: 10, output: 20, cacheRead: 100, cacheWrite: 5 },
@@ -177,9 +178,41 @@ test("a run cut off by the turn limit says so, instead of the half-sentence it s
   assert.equal(parsed.finalMessage, "cut off by the turn limit after 40 turns");
   // The agent's own words stay in the transcript; only the run's final message is replaced.
   assert.deepEqual(parsed.transcript, [
-    { thread: "main", at: 0, type: "assistant", text: "Now let's make the memory edits.", model: null, usage: null },
+    { thread: "main", at: 0, type: "assistant", turn: 0, text: "Now let's make the memory edits.", model: null, usage: null },
     { thread: "main", at: 0, type: "error", message: "cut off by the turn limit after 40 turns" },
   ]);
+});
+
+test("one API message split over several assistant events is one turn", () => {
+  // Claude Code emits one `assistant` event per content block; both carry the message's id.
+  const message = (block: string) =>
+    `{"type":"assistant","message":{"id":"msg_01","model":"claude-sonnet-5","content":[${block}],` +
+    `"usage":{"input_tokens":10,"output_tokens":4}}}`;
+  const lines = [
+    message('{"type":"text","text":"Reading the cache first."}'),
+    message('{"type":"tool_use","id":"toolu_01","name":"Read","input":{"file_path":"src/cache.ts"}}'),
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"..."}]}}',
+    '{"type":"assistant","message":{"id":"msg_02","model":"claude-sonnet-5","content":[{"type":"text","text":"Done."}]}}',
+  ];
+
+  const parsed = parseStreamJson(lines);
+  const assistants = parsed.transcript.filter((e) => e.type === "assistant");
+  assert.deepEqual(
+    assistants.map((a) => a.turn),
+    [0, 0, 1],
+  );
+  assert.equal(parsed.turns, 2);
+  const t = telemetry(parsed.transcript, 0);
+  assert.equal(t.main.turns, 2);
+  assert.equal(t.main.turns, parsed.turns);
+  assert.equal(t.turnsBeforeFirstEdit, 2);
+  // Usage is per event, as the stream reports it; the turn count is what changes.
+  assert.deepEqual(t.main.tokens, { input: 20, output: 8, cacheRead: 0, cacheWrite: 0 });
+
+  // A result event's own count is preferred, and agrees when the stream is whole.
+  const withResult = parseStreamJson([...lines, '{"type":"result","subtype":"success","num_turns":2,"result":"Done."}']);
+  assert.equal(withResult.turns, 2);
+  assert.equal(telemetry(withResult.transcript, 0).main.turns, 2);
 });
 
 test("a stream without a result event has no result subtype", () => {
@@ -202,8 +235,8 @@ test("garbage, blank lines and unknown event types are skipped", () => {
   assert.equal(parsed.finalMessage, "still here");
   assert.equal(parsed.turns, 2);
   assert.deepEqual(parsed.transcript, [
-    { thread: "main", at: 0, type: "assistant", text: "still here", model: null, usage: null },
-    { thread: "main", at: 0, type: "assistant", text: "", model: null, usage: null },
+    { thread: "main", at: 0, type: "assistant", turn: 0, text: "still here", model: null, usage: null },
+    { thread: "main", at: 0, type: "assistant", turn: 1, text: "", model: null, usage: null },
   ]);
 });
 

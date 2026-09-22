@@ -55,11 +55,11 @@ const at = (n: number) => n * 1000;
 
 /** A main thread that reads, spawns an explorer, runs a shell command, writes, and reports. */
 const WITH_SUBAGENT: TranscriptEvent[] = [
-  { type: "assistant", thread: "main", at: at(1), text: "Looking at the cache first.", model: "claude-opus-5", usage: null },
+  { type: "assistant", thread: "main", at: at(1), turn: 0, text: "Looking at the cache first.", model: "claude-opus-5", usage: null },
   { type: "tool_call", thread: "main", at: at(2), id: "t1", tool: "Read", input: { file_path: "/tree/src/cache.ts" }, kind: "read", path: "src/cache.ts" },
   { type: "tool_result", thread: "main", at: at(3), id: "t1", isError: false, output: "export const cache = new Map();\n" },
   { type: "tool_call", thread: "main", at: at(4), id: "spawn1", tool: "Task", input: { subagent_type: "Explore", prompt: "Which files read from the cache?\nList them." }, kind: "spawn", path: null },
-  { type: "assistant", thread: "spawn1", at: at(5), text: "", model: "claude-haiku-4-5", usage: null },
+  { type: "assistant", thread: "spawn1", at: at(5), turn: 1, text: "", model: "claude-haiku-4-5", usage: null },
   { type: "tool_call", thread: "spawn1", at: at(6), id: "s1", tool: "Grep", input: { pattern: "cache" }, kind: "search", path: null },
   { type: "tool_result", thread: "spawn1", at: at(7), id: "s1", isError: false, output: "src/read.ts\n" },
   { type: "tool_call", thread: "spawn1", at: at(8), id: "s2", tool: "Read", input: { file_path: "/tree/src/read.ts" }, kind: "read", path: "src/read.ts" },

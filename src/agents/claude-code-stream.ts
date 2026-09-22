@@ -152,6 +152,8 @@ export class StreamParser {
   };
 
   private readonly tree: string | undefined;
+  /** API message id → turn index. Claude Code emits one `assistant` event per content block. */
+  private readonly turns = new Map<string, number>();
   private assistantMessages = 0;
   private sawResult = false;
 
@@ -194,8 +196,19 @@ export class StreamParser {
     return this.parsed;
   }
 
+  /** The turn an assistant event belongs to: one per API message id, a new one when there is none. */
+  private turn(own: Json): number {
+    const id = str(own["id"]);
+    const known = id === null ? undefined : this.turns.get(id);
+    if (known !== undefined) return known;
+    const turn = this.assistantMessages++;
+    if (id !== null) this.turns.set(id, turn);
+    return turn;
+  }
+
   private assistant(event: Json, at: number): void {
-    this.assistantMessages++;
+    const own = message(event);
+    const turn = this.turn(own);
     const base = { thread: thread(event), at };
     const texts: string[] = [];
     const calls: TranscriptEvent[] = [];
@@ -219,10 +232,10 @@ export class StreamParser {
       }
     }
     const text = texts.join("\n");
-    const own = message(event);
     this.parsed.transcript.push({
       ...base,
       type: "assistant",
+      turn,
       text: truncate(text),
       model: str(own["model"]),
       usage: usage(own["usage"]),

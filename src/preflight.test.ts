@@ -267,6 +267,7 @@ test("requireJudgeModel resolves environment over judge.json over config, and th
     model: "claude-sonnet-4-5",
     apiKeyEnv: "ANTHROPIC_API_KEY",
     baseUrl: "",
+    structuredOutputs: true,
   });
 
   const overridden = judge({ provider: "openai", model: "gpt-5", apiKeyEnv: "TEAM_OPENAI_KEY" });
@@ -275,6 +276,7 @@ test("requireJudgeModel resolves environment over judge.json over config, and th
     model: "gpt-5",
     apiKeyEnv: "TEAM_OPENAI_KEY",
     baseUrl: "",
+    structuredOutputs: true,
   });
 
   const env = { HARNESSBENCH_JUDGE_PROVIDER: "google", HARNESSBENCH_JUDGE_MODEL: "gemini-3-pro" };
@@ -303,6 +305,13 @@ test("requireJudgeModel refuses a missing model, a bad provider override, and op
   cliError(() => requireJudgeModel(judge(), compatible, {}), /openai-compatible provider, which needs "judge\.baseUrl"/);
   const resolved = requireJudgeModel(judge(), { ...compatible, baseUrl: "http://localhost:11434/v1" }, {});
   assert.equal(resolved.baseUrl, "http://localhost:11434/v1");
+  assert.equal(resolved.structuredOutputs, true);
+  const plain = requireJudgeModel(
+    judge(),
+    { ...compatible, baseUrl: "http://localhost:11434/v1", structuredOutputs: false },
+    {},
+  );
+  assert.equal(plain.structuredOutputs, false);
   assert.equal(resolved.apiKeyEnv, "OPENAI_API_KEY");
 });
 

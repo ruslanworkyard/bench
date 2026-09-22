@@ -51,6 +51,10 @@ test("the system prompt is the rubric followed by the fixed instruction block, a
   assert.equal(system, `Criterion: quality.\n\n${INSTRUCTIONS}\n`);
   assert.match(INSTRUCTIONS, /^You are comparing two independent attempts, A and B,/);
   assert.match(INSTRUCTIONS, /otherwise answer tie\./);
+  assert.match(
+    INSTRUCTIONS,
+    /decided it, in one or two sentences\. Answer with a JSON object with exactly two keys: "preference", whose value is "A", "B" or "tie", and "reason"\.$/,
+  );
   const prompt = model.doGenerateCalls[0]?.prompt ?? [];
   assert.equal(prompt[0]?.role, "system");
   assert.equal(prompt[0]?.content, system);

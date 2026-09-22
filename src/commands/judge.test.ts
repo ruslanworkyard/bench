@@ -111,7 +111,7 @@ function record(stamp: string, environment: Environment, patch: Partial<RunRecor
 type Side = { record?: Partial<RunRecord>; diff?: string; transcript?: TranscriptEvent[] };
 
 const TRANSCRIPT: TranscriptEvent[] = [
-  { type: "assistant", thread: "main", at: 100, text: "Reading the cache.", model: "claude-sonnet-4-5", usage: null },
+  { type: "assistant", thread: "main", at: 100, turn: 0, text: "Reading the cache.", model: "claude-sonnet-4-5", usage: null },
   { type: "tool_call", thread: "main", at: 200, id: "t1", tool: "Read", input: { file_path: "src/cache.ts" }, kind: "read", path: "src/cache.ts" },
   { type: "tool_result", thread: "main", at: 300, id: "t1", isError: false, output: "..." },
 ];

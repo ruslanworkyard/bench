@@ -105,7 +105,10 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
   missing key takes its default, so a config written before a key existed keeps loading
   (`setupCommand` → `""`; no `judge` block → anthropic, empty model, 512 KB).
   `judge` = `{provider: anthropic|openai|google|openai-compatible, model, apiKeyEnv, baseUrl,
-  maxContextKb}`; `judges` = the ids to run, in order. `init` writes `model: ""`: the choice is
+  structuredOutputs, maxContextKb}` (`structuredOutputs`, default true, is passed to
+  `createOpenAICompatible` as `supportsStructuredOutputs`; the SDK defaults it to false and
+  then drops the verdict schema, which is what the first OpenRouter run hit; the other three
+  providers ignore it); `judges` = the ids to run, in order. `init` writes `model: ""`: the choice is
   the user's, and `judge` refuses until it is made.
 - `fixtures.ts` — locate packaged fixtures via `import.meta.url`, copy into the host.
 - `judges.ts` — the judge catalogue: `validateJudge` (unknown keys, `context` from the fixed
@@ -137,8 +140,11 @@ Files are grouped by **what they are allowed to do to the world**, not by featur
   (ms since the agent started, stamped by the adapter on arrival; the parser reads no
   clock); `assistant` events carry `model` and per-message `usage`; `tool_call` events
   carry an adapter-neutral `kind` and the `path` relative to the tree. One `assistant`
-  event per assistant message, even one with no text, so its usage and the turn count are
-  never lost. `RunRecord.telemetry` is optional only because older `run.json` files lack it;
+  event per assistant message, even one with no text, so its usage is never lost; each
+  carries `turn`, the adapter's index of the model response it came from (Claude Code emits
+  one `assistant` event per content block, all with the same `message.id`, so a text block
+  plus a tool call share a `turn`). `ThreadStats.turns` and `turnsBeforeFirstEdit` count
+  distinct `turn` values, the meaning `RunRecord.turns` has, so the two figures agree. `RunRecord.telemetry` is optional only because older `run.json` files lack it;
   `run` always writes it; `compare` shows those rows as `n/a`, "recorded by an earlier
   version". Sub-agent tokens are part of the run's totals, reported per thread, never
   subtracted.
@@ -341,9 +347,9 @@ a fake shell script stands in, so the suite is free, offline and deterministic.
   last of Claude Code's `result` events (it emits one when main yields to a background
   sub-agent and one at the end). `formatRun` gained `Threads` and `Phases` lines.
   `test/fixtures/claude-stream-subagent.jsonl` is the fake stream with a sub-agent, per-
-  message usage and two results. Schema stays 2. Not built: classifying shell commands,
-  deduplicating an assistant message the stream splits across
-  several `assistant` events (each counts as a turn and carries the same usage, as today).
+  message usage and two results. Schema stays 2. Not built: classifying shell commands.
+  Turn counting was fixed on 2026-09-22 (see `telemetry.ts` above): events split from one
+  message share a `turn`; their usage is still summed per event, as the stream reports it.
 
 - `max_turns` outcome (2026-09-20). `RunOutcome` (`run-record.ts`, imported by
   `AgentResult`) is `completed | max_turns | timeout | error`. A run that hits the turn cap
