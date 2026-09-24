@@ -1,16 +1,13 @@
-import { existsSync, readFileSync } from "node:fs";
 import { relative } from "node:path";
 
-// Type-only, so compare.ts importing the value formatters below is not a cycle.
-import type { JudgePairResult, JudgeRecord } from "./commands/judge.js";
-import { JUDGE_ROW_PREFIX, type Comparison, type Rollup, type RollupRow, type Row } from "./compare.js";
+import { JUDGE_ROW_PREFIX, type Classification, type Comparison, type Rollup, type RollupRow } from "./compare.js";
 import { ENV_FILE, RUNS_DIR } from "./config.js";
 import type { HarnessEntry } from "./detect/harness.js";
 import type { Detection } from "./detect/types.js";
 import type { ProgressEvent } from "./commands/run.js";
 import type { OpStatus } from "./plan.js";
-import type { CommandResult, RunRecord } from "./run-record.js";
-import type { Telemetry } from "./telemetry.js";
+import type { BatchReport, ReportFixture, SideSummary } from "./report.js";
+import { REPORT_MARKDOWN, reportDir, type CommandResult } from "./run-record.js";
 
 export type FileReport = { path: string; status: OpStatus };
 
@@ -134,9 +131,6 @@ export function formatSameHarness(sha: string): string {
   ].join("\n");
 }
 
-const STDERR_TAIL_LINES = 5;
-const FINAL_MESSAGE_LINES = 3;
-
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`;
   const seconds = Math.round(ms / 1000);
@@ -168,94 +162,12 @@ function setupLine(setup: CommandResult): string {
   return `${setup.command} → failed (${how}) in ${took}`;
 }
 
-function testsLine(tests: RunRecord["tests"]): string {
+function testsLine(tests: CommandResult | null): string {
   if (tests === null) return "not configured";
   if (tests.timedOut) return `${tests.command} → timed out after ${formatDuration(tests.durationMs)}`;
   if (tests.exitCode === 0) return `${tests.command} → passed in ${formatDuration(tests.durationMs)}`;
   const how = tests.exitCode === null ? "killed" : `exit ${tests.exitCode}`;
   return `${tests.command} → failed, ${how}`;
-}
-
-/** `main 23 turns / 41 calls · Explore on claude-haiku-4-5: 12 calls`. */
-function threadsLine(t: Telemetry | undefined): string {
-  if (t === undefined) return "not recorded";
-  const main = `main ${plural(t.main.turns, "turn")} / ${plural(t.main.toolCalls, "call")}`;
-  const subs = t.subAgents.map(
-    (sub) => `${sub.tool} on ${sub.model ?? "model not reported"}: ${plural(sub.toolCalls, "call")}`,
-  );
-  return [main, ...subs].join(" · ");
-}
-
-function phasesLine(t: Telemetry | undefined): string {
-  if (t === undefined) return "not recorded";
-  const { exploringMs, buildingMs, verifyingMs } = t.phases;
-  return (
-    `exploring ${formatDuration(exploringMs)} · building ${formatDuration(buildingMs)} · ` +
-    `verifying ${formatDuration(verifyingMs)}`
-  );
-}
-
-function lastLines(text: string, n: number): string[] {
-  return text.trimEnd().split("\n").filter((line) => line !== "").slice(-n);
-}
-
-/** One run, summarised. `agentStderrPath` is read only when the outcome is an error. */
-export function formatRun(record: RunRecord, agentStderrPath: string): string {
-  const lines: string[] = [];
-  const when = record.outcome === "completed" ? "in" : "after";
-  lines.push(
-    `harnessbench run  ${record.fixture} · ${record.environment}  → ` +
-      `${record.outcome} ${when} ${formatDuration(record.durationMs)}`,
-  );
-
-  const calls = Object.entries(record.toolCalls);
-  const total = calls.reduce((sum, [, n]) => sum + n, 0);
-  const byTool = calls.length === 0 ? "" : ` (${calls.map(([tool, n]) => `${tool} ${n}`).join(", ")})`;
-  const { tokens } = record;
-
-  lines.push("");
-  const { harness } = record;
-  lines.push(
-    `${"Harness".padEnd(11)}${plural(harness.files.length, "file")} at ${harness.sha.slice(0, 7)} ` +
-      `(${harness.ref === harness.sha ? "merge base" : harness.ref}) · hash ${harness.hash.slice(0, 12)}`,
-  );
-  lines.push(`${"Agent".padEnd(11)}${record.agent.name} · ${record.agent.model ?? "model not reported"}`);
-  // Records written before the setup step have no such key at all: nothing to show either way.
-  if (record.setup) lines.push(`${"Setup".padEnd(11)}${setupLine(record.setup)}`);
-  lines.push(
-    `${"Turns".padEnd(11)}${String(record.turns).padEnd(5)}Tool calls  ${total}${byTool}   ` +
-      `Tool failures ${record.toolFailures}`,
-  );
-  lines.push(`${"Threads".padEnd(11)}${threadsLine(record.telemetry)}`);
-  lines.push(`${"Phases".padEnd(11)}${phasesLine(record.telemetry)}`);
-  lines.push(
-    `${"Tokens".padEnd(11)}in ${formatCount(tokens.input)}  out ${formatCount(tokens.output)}  ` +
-      `cache read ${formatCount(tokens.cacheRead)}  cache write ${formatCount(tokens.cacheWrite)}`,
-  );
-  lines.push(`${"Cost".padEnd(11)}${record.costUsd === null ? "not reported" : formatUsd(record.costUsd)}`);
-  lines.push(
-    `${"Changes".padEnd(11)}${plural(record.diff.files, "file")}, +${record.diff.added} / -${record.diff.removed}`,
-  );
-  lines.push(`${"Tests".padEnd(11)}${testsLine(record.tests)}`);
-  lines.push(`${"Run dir".padEnd(11)}${RUNS_DIR}/${record.runId}`);
-
-  lines.push("");
-  const message = lastLines(record.finalMessage, Infinity).slice(0, FINAL_MESSAGE_LINES);
-  if (message.length === 0) lines.push("Final message: (none)");
-  else {
-    lines.push(`Final message: ${message[0]}`);
-    for (const line of message.slice(1)) lines.push(`${" ".repeat(15)}${line}`);
-  }
-
-  if (record.outcome === "error") {
-    const stderr = existsSync(agentStderrPath) ? readFileSync(agentStderrPath, "utf8") : "";
-    const tail = lastLines(stderr, STDERR_TAIL_LINES);
-    lines.push("");
-    lines.push(tail.length === 0 ? "Agent stderr: (empty)" : `Agent stderr (last ${tail.length} lines):`);
-    for (const line of tail) lines.push(`  ${line}`);
-  }
-
-  return lines.join("\n");
 }
 
 /** `0.8s` for anything under ten seconds, then as `formatDuration`. */
@@ -267,6 +179,12 @@ function seconds(ms: number): string {
 function ended(result: CommandResult): string {
   if (result.timedOut) return "timed out";
   return result.exitCode === null ? "killed" : `exit ${result.exitCode}`;
+}
+
+/** `05:01`: minutes and seconds, the minutes never wrapping into hours. */
+function clock(ms: number): string {
+  const total = Math.floor(ms / 1000);
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
 }
 
 /**
@@ -282,15 +200,18 @@ export function formatProgress(
   environment: string,
   event: ProgressEvent,
 ): string {
-  const total = Math.floor(elapsedMs / 1000);
-  const clock = `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
-  return `[${clock}] ${fixture.padEnd(fixtureWidth)}  ${environment.padEnd(11)}${progressText(event)}`;
+  return `[${clock(elapsedMs)}] ${fixture.padEnd(fixtureWidth)}  ${environment.padEnd(11)}${progressText(event)}`;
 }
 
 /** What `run` says on stderr before any side starts: how much it is about to do. */
 export function formatBatchPlan(fixtures: string[]): string {
   const n = fixtures.length;
   return `running ${n} fixture${n === 1 ? "" : "s"} × 2 sides = ${n * 2} runs: ${fixtures.join(", ")}`;
+}
+
+/** What `run` says on stderr once every side is done, before the summary: `6 runs finished in 05:12`. */
+export function formatRunsFinished(runs: number, elapsedMs: number): string {
+  return `${plural(runs, "run")} finished in ${clock(elapsedMs)}`;
 }
 
 function progressText(event: ProgressEvent): string {
@@ -330,16 +251,7 @@ function models(c: Comparison): string {
   return previous === candidate ? previous : `previous ${previous} → candidate ${candidate}`;
 }
 
-/** Text tables wrap a judge row's note so the whole line fits in this many columns. */
-const TABLE_WIDTH = 100;
-/**
- * The note column is never narrower than this: with a `candidate preferred` delta the other
- * columns already reach column 80, and a note wrapped into what is left would be a sliver.
- * When the floor applies, the lines run past TABLE_WIDTH.
- */
-const MIN_NOTE_WIDTH = 40;
-
-function isJudgeRow(row: Row): boolean {
+function isJudgeRow(row: { id: string }): boolean {
   return row.id.startsWith(JUDGE_ROW_PREFIX);
 }
 
@@ -348,173 +260,8 @@ function judgedLine(c: Comparison): string {
   return c.judged === null ? "judges: not run" : `judged by ${c.judged.provider} ${c.judged.model}`;
 }
 
-/** Greedy word wrap; a word longer than `width` gets a line of its own. */
-function wrap(text: string, width: number): string[] {
-  const lines: string[] = [];
-  let current = "";
-  for (const word of text.split(/\s+/).filter((each) => each !== "")) {
-    if (current === "") current = word;
-    else if (current.length + 1 + word.length <= width) current += ` ${word}`;
-    else {
-      lines.push(current);
-      current = word;
-    }
-  }
-  if (current !== "") lines.push(current);
-  return lines;
-}
-
-/**
- * The delta table for one fixture: header, the fixed noise line, warnings, the mechanical
- * rows, then (when judges are configured) a line saying who judged and the judge rows in the
- * same columns, their notes wrapped to the table width.
- */
-export function formatComparison(c: Comparison): string {
-  const lines: string[] = [];
-  lines.push(`harnessbench compare  ${c.fixture} · code ${short(c.headSha)}`);
-  lines.push("");
-  lines.push(
-    `${"Harness".padEnd(11)}previous ${short(c.previous.harnessSha)} → candidate ${short(c.candidate.harnessSha)}`,
-  );
-  lines.push(`${"Model".padEnd(11)}${models(c)}`);
-  lines.push(`${"Runs".padEnd(11)}${c.previous.runId} → ${c.candidate.runId}`);
-
-  lines.push("");
-  lines.push(NOISE_LINE);
-  for (const warning of c.warnings) lines.push(`warning: ${warning}`);
-
-  lines.push("");
-  const cells = (row: Row): string[] => [
-    row.label,
-    row.previous,
-    row.candidate === "" ? "" : `→ ${row.candidate}`,
-    row.delta,
-    row.classification,
-  ];
-  const all = c.rows.map(cells);
-  const widths = all[0]?.map((_, i) => Math.max(...all.map((row) => row[i]?.length ?? 0))) ?? [];
-  const noteAt = widths.reduce((sum, width) => sum + width + 2, 0);
-  const line = (row: Row, note: string): string =>
-    [...cells(row).map((cell, i) => cell.padEnd(widths[i] ?? 0)), note].join("  ").trimEnd();
-
-  for (const row of c.rows.filter((each) => !isJudgeRow(each))) lines.push(line(row, row.note ?? ""));
-
-  const judgeRows = c.rows.filter(isJudgeRow);
-  if (judgeRows.length > 0) {
-    lines.push("");
-    lines.push(judgedLine(c));
-    const width = Math.max(TABLE_WIDTH - noteAt, MIN_NOTE_WIDTH);
-    for (const row of judgeRows) {
-      const [first = "", ...rest] = wrap(row.note ?? "", width);
-      lines.push(line(row, first));
-      for (const piece of rest) lines.push(`${" ".repeat(noteAt)}${piece}`);
-    }
-  }
-  return lines.join("\n");
-}
-
 /** Printed above every roll-up. Its counts are fixtures, and every count names them. */
 export const ROLLUP_LINE = "one run per side per fixture; counts are fixtures, names in brackets";
-
-/** The classification words of a roll-up cell: verdict words for a judge row, delta words otherwise. */
-function bucketWords(row: RollupRow): Array<[string, string[]]> {
-  const judge = row.id.startsWith(JUDGE_ROW_PREFIX);
-  return [
-    [judge ? "candidate" : "improved", row.improved],
-    [judge ? "previous" : "regressed", row.regressed],
-    [judge ? "tie" : "unchanged", row.unchanged],
-    ["n/a", row.na],
-  ];
-}
-
-/**
- * The batch's roll-up: one line per criterion, each classification that applies with its
- * count and the fixtures behind it. `n/a` appears only when some fixture has it.
- */
-export function formatRollup(rollup: Rollup, headSha: string): string {
-  const lines: string[] = [];
-  lines.push(`harnessbench rollup  ${plural(rollup.fixtures, "fixture")} · code ${short(headSha)}`);
-  lines.push("");
-  lines.push(ROLLUP_LINE);
-  for (const warning of rollup.warnings) lines.push(`warning: ${warning}`);
-  lines.push("");
-  const width = Math.max(0, ...rollup.rows.map((row) => row.label.length));
-  for (const row of rollup.rows) {
-    const cells = bucketWords(row)
-      .filter(([, fixtures]) => fixtures.length > 0)
-      .map(([word, fixtures]) => `${word} ${fixtures.length} [${fixtures.join(", ")}]`);
-    lines.push(`${row.label.padEnd(width)}  ${cells.join("   ")}`);
-  }
-  return lines.join("\n");
-}
-
-/** What one fixture contributes to a batch's output; the command fills in what it has. */
-export type BatchFixtureReport = {
-  fixture: string;
-  /** `run` only: each side that finished, previous first, for the summaries. */
-  sides?: Array<{ record: RunRecord; stderrPath: string }>;
-  /** `judge` only: what judging this pair did. */
-  judging?: JudgePairResult;
-  comparison: Comparison | null;
-  /** Why there is no comparison, or what went wrong beside one. */
-  error: string | null;
-};
-
-/** `── ttl-cache ──`: the line above each fixture's blocks in a batch. */
-export function formatFixtureHeading(fixture: string): string {
-  return `── ${fixture} ──`;
-}
-
-/**
- * A batch's text output: the roll-up, then every fixture's blocks under its heading, in the
- * order given. A batch of one fixture prints that fixture's blocks alone, exactly as a
- * single-fixture command does.
- */
-export function formatBatch(rollup: Rollup, fixtures: BatchFixtureReport[], headSha: string): string {
-  const blocks = (report: BatchFixtureReport): string[] => [
-    ...(report.sides ?? []).map((side) => formatRun(side.record, side.stderrPath)),
-    ...(report.judging === undefined ? [] : [formatJudging(report.judging)]),
-    ...(report.comparison === null ? [] : [formatComparison(report.comparison)]),
-    ...(report.error === null ? [] : [`error: ${report.error}`]),
-  ];
-  if (fixtures.length === 1) return blocks(fixtures[0] as BatchFixtureReport).join("\n\n");
-  const sections = fixtures.map((report) => [formatFixtureHeading(report.fixture), ...blocks(report)].join("\n\n"));
-  return [formatRollup(rollup, headSha), ...sections].join("\n\n");
-}
-
-/**
- * The batch as markdown: the roll-up as a table with fixture names in the cells, then each
- * fixture's comparison table folded into a `<details>` block.
- */
-export function formatBatchMarkdown(rollup: Rollup, fixtures: BatchFixtureReport[], headSha: string): string {
-  const lines: string[] = [];
-  lines.push(`### harnessbench: ${plural(rollup.fixtures, "fixture")} on code ${short(headSha)}`);
-  lines.push("");
-  lines.push(`_${ROLLUP_LINE}_`);
-  if (rollup.warnings.length > 0) {
-    lines.push("");
-    for (const warning of rollup.warnings) lines.push(`> **warning:** ${cell(warning)}`);
-  }
-  lines.push("");
-  lines.push("| Criterion | Improved | Regressed | Unchanged | n/a |");
-  lines.push("|---|---|---|---|---|");
-  for (const row of rollup.rows) {
-    const cells = [row.label, row.improved, row.regressed, row.unchanged, row.na].map((each) =>
-      cell(Array.isArray(each) ? each.join(", ") : each),
-    );
-    lines.push(`| ${cells.join(" | ")} |`);
-  }
-  for (const report of fixtures) {
-    lines.push("");
-    lines.push(`<details><summary>${cell(report.fixture)}</summary>`);
-    lines.push("");
-    if (report.comparison !== null) lines.push(formatComparisonMarkdown(report.comparison));
-    if (report.error !== null) lines.push(`> **error:** ${cell(report.error)}`);
-    lines.push("");
-    lines.push("</details>");
-  }
-  return lines.join("\n");
-}
 
 /** Pipes and newlines would break the table; nothing else in a cell needs escaping. */
 function cell(text: string): string {
@@ -552,36 +299,239 @@ export function formatComparisonMarkdown(c: Comparison): string {
   return lines.join("\n");
 }
 
-/** `candidate preferred`, `previous preferred` or `tie`: the verdict, in the reader's words. */
-function preferenceLabel(preference: JudgeRecord["verdicts"][number]["preference"]): string {
-  return preference === "tie" ? "tie" : `${preference} preferred`;
+// --- the batch report ---
+
+/** The rows the Outcome verdict line is made of; every other mechanical row is Efficiency. */
+const OUTCOME_ROWS = new Set(["outcome", "tests"]);
+
+/** The worst classification first: a fixture's Outcome is the worst of its outcome and tests rows. */
+const SEVERITY: Classification[] = ["regressed", "improved", "unchanged", "n/a"];
+
+/** `harnessbench  2 fixtures · code 9c4c5e2 · previous cca3e7c → candidate 9c4c5e2 · claude-sonnet-5`. */
+function reportHeader(report: BatchReport): string {
+  return (
+    `harnessbench  ${plural(report.fixtures.length, "fixture")} · code ${short(report.headSha)} · ` +
+    `previous ${short(report.harness.previous)} → candidate ${short(report.harness.candidate)} · ` +
+    `${report.agent.model ?? "model not reported"}`
+  );
+}
+
+/** `unchanged 2`, or `regressed 1 · unchanged 1`: per compared fixture, the worse of outcome and tests. */
+function outcomeVerdict(report: BatchReport): string {
+  const counts = new Map<Classification, number>();
+  for (const { comparison } of report.fixtures) {
+    if (comparison === null) continue;
+    const found = comparison.rows.filter((row) => OUTCOME_ROWS.has(row.id)).map((row) => row.classification);
+    const worst = SEVERITY.find((each) => found.includes(each)) ?? "n/a";
+    counts.set(worst, (counts.get(worst) ?? 0) + 1);
+  }
+  if (counts.size === 0) return "nothing compared";
+  return SEVERITY.filter((each) => counts.has(each))
+    .map((each) => `${each} ${counts.get(each)}`)
+    .join(" · ");
+}
+
+/** `regressed: Turns 2, Cost 2 · improved: Exploring 1`; only rows that moved, `unchanged` when none did. */
+function efficiencyVerdict(rollup: Rollup): string {
+  const rows = rollup.rows.filter((row) => !isJudgeRow(row) && !OUTCOME_ROWS.has(row.id));
+  const moved = (pick: (row: RollupRow) => string[]): string =>
+    rows
+      .filter((row) => pick(row).length > 0)
+      .map((row) => `${row.label} ${pick(row).length}`)
+      .join(", ");
+  const parts = [
+    ["regressed", moved((row) => row.regressed)],
+    ["improved", moved((row) => row.improved)],
+  ].filter(([, list]) => list !== "");
+  if (parts.length === 0) return rows.length === 0 ? "nothing compared" : "unchanged";
+  return parts.map(([word, list]) => `${word}: ${list}`).join(" · ");
+}
+
+/** `candidate 5 · previous 1 · tie 0`, counted over every fixture and judge; unjudged rows only when there are some. */
+function judgesVerdict(rollup: Rollup): string {
+  const rows = rollup.rows.filter(isJudgeRow);
+  if (rows.length === 0) return "none configured";
+  const sum = (pick: (row: RollupRow) => string[]): number => rows.reduce((total, row) => total + pick(row).length, 0);
+  const counts = `candidate ${sum((row) => row.improved)} · previous ${sum((row) => row.regressed)} · tie ${sum((row) => row.unchanged)}`;
+  const unjudged = sum((row) => row.na);
+  return unjudged === 0 ? counts : `${counts} · not judged ${unjudged}`;
+}
+
+function verdictLines(report: BatchReport): Array<[string, string]> {
+  return [
+    ["Outcome", outcomeVerdict(report)],
+    ["Efficiency", efficiencyVerdict(report.rollup)],
+    ["Judges", judgesVerdict(report.rollup)],
+  ];
+}
+
+/** The word a judge row's classification stands for: which side it preferred. */
+const PREFERENCE: Record<Classification, string> = {
+  improved: "candidate",
+  regressed: "previous",
+  unchanged: "tie",
+  "n/a": "not judged",
+};
+
+/** `code quality candidate`, one per judge row of the fixture; none when it has no table or no judges. */
+function verdictCells(fixture: ReportFixture): string[] {
+  const rows = fixture.comparison?.rows.filter(isJudgeRow) ?? [];
+  return rows.map((row) => `${row.label.toLowerCase()} ${PREFERENCE[row.classification]}`);
+}
+
+/** What a fixture line says instead of verdicts: its error's first line, or why there are none. */
+function fixtureStatus(fixture: ReportFixture): string | null {
+  if (fixture.error !== null) return `error: ${fixture.error.split("\n")[0] ?? ""}`;
+  if (fixture.comparison === null) return "not compared";
+  if (verdictCells(fixture).length === 0) return "no judges configured";
+  return null;
 }
 
 /**
- * What `judge` did, printed above the table: a header naming the pair, then one line per
- * configured judge, the verdict for a judge it ran and `kept (rubric unchanged)` for one it
- * did not. Verdicts for judges no longer configured are left to the table.
+ * What `run`, `compare` and `judge` print by default, one screen at most: the header, any
+ * warnings, the three verdict lines, one line per fixture with each judge's preference, and
+ * where the full report is (`path`; no line when null). No reasons, no per-side detail.
  */
-export function formatJudging(result: JudgePairResult): string {
-  const { record } = result;
+export function formatSummaryReport(
+  report: BatchReport,
+  path: string | null = `${reportDir(report.stamp)}/${REPORT_MARKDOWN}`,
+): string {
+  const lines: string[] = [reportHeader(report), ""];
+  for (const warning of report.rollup.warnings) lines.push(`warning: ${warning}`);
+  for (const [label, text] of verdictLines(report)) lines.push(`${label.padEnd(12)}${text}`);
+
+  lines.push("");
+  const nameWidth = Math.max(0, ...report.fixtures.map((each) => each.fixture.length));
+  const cells = report.fixtures.map(verdictCells);
+  // Each judge's column as wide as its widest cell, so the preferences line up across fixtures.
+  const widths: number[] = [];
+  for (const row of cells) row.forEach((text, i) => (widths[i] = Math.max(widths[i] ?? 0, text.length)));
+  report.fixtures.forEach((fixture, i) => {
+    const text = fixtureStatus(fixture) ?? (cells[i] ?? []).map((each, j) => each.padEnd(widths[j] ?? 0)).join(" · ");
+    lines.push(`${fixture.fixture.padEnd(nameWidth)}  ${text}`.trimEnd());
+  });
+
+  if (path !== null) {
+    lines.push("");
+    lines.push(`report  ${path}`);
+  }
+  return lines.join("\n");
+}
+
+/** The report as `--json` prints it and `report.json` holds it. */
+export function formatReportJson(report: BatchReport): string {
+  return JSON.stringify(report, null, 2);
+}
+
+/** The roll-up as a table with fixture names in the cells. */
+function rollupMarkdown(rollup: Rollup): string[] {
   const lines: string[] = [];
-  lines.push(`harnessbench judge  ${record.fixture} · code ${short(record.headSha)}`);
+  lines.push(`_${ROLLUP_LINE}_`);
   lines.push("");
-  lines.push(`${"Runs".padEnd(11)}${record.previous.runId} → ${record.candidate.runId}`);
-  lines.push(`${"Shown as".padEnd(11)}A = ${record.mapping.A}, B = ${record.mapping.B}`);
-  lines.push("");
-  const shown = record.verdicts.filter((verdict) => result.judged.includes(verdict.judge) || result.kept.includes(verdict.judge));
-  const titleWidth = Math.max(0, ...shown.map((verdict) => verdict.title.length));
-  const labelWidth = Math.max(0, ...shown.map((verdict) => preferenceLabel(verdict.preference).length));
-  for (const verdict of shown) {
-    if (result.kept.includes(verdict.judge)) {
-      lines.push(`${verdict.title.padEnd(titleWidth)}  kept (rubric unchanged)`);
-      continue;
-    }
-    const reason = verdict.reason.replace(/\s*\n\s*/g, " ").trim();
-    lines.push(
-      `${verdict.title.padEnd(titleWidth)}  ${preferenceLabel(verdict.preference).padEnd(labelWidth)}   ${reason}`.trimEnd(),
+  lines.push("| Criterion | Improved | Regressed | Unchanged | n/a |");
+  lines.push("|---|---|---|---|---|");
+  for (const row of rollup.rows) {
+    const cells = [row.label, row.improved, row.regressed, row.unchanged, row.na].map((each) =>
+      cell(Array.isArray(each) ? each.join(", ") : each),
     );
+    lines.push(`| ${cells.join(" | ")} |`);
+  }
+  return lines;
+}
+
+/** `30 (Read 20, Edit 10), 2 failed`. */
+function toolCallsText(side: SideSummary): string {
+  const byTool = Object.entries(side.toolCalls.byTool).map(([tool, n]) => `${tool} ${n}`);
+  const detail = byTool.length === 0 ? "" : ` (${byTool.join(", ")})`;
+  return `${side.toolCalls.total}${detail}, ${side.toolFailures} failed`;
+}
+
+function tokensText(side: SideSummary): string {
+  const { tokens } = side;
+  return (
+    `in ${formatCount(tokens.input)}, out ${formatCount(tokens.output)}, ` +
+    `cache read ${formatCount(tokens.cacheRead)}, cache write ${formatCount(tokens.cacheWrite)}`
+  );
+}
+
+/** The per-side table: one row per side that finished, previous first. */
+function sidesMarkdown(sides: Array<[string, SideSummary]>): string[] {
+  const lines = [
+    "| Side | Outcome | Duration | Turns | Tool calls | Tokens | Cost | Setup | Tests | Changes |",
+    "|---|---|---|---|---|---|---|---|---|---|",
+  ];
+  for (const [name, side] of sides) {
+    const cells = [
+      name,
+      side.outcome,
+      formatDuration(side.durationMs),
+      formatCount(side.turns),
+      toolCallsText(side),
+      tokensText(side),
+      side.costUsd === null ? "not reported" : formatUsd(side.costUsd),
+      side.setup === null ? "none" : setupLine(side.setup),
+      testsLine(side.tests),
+      `${plural(side.diff.files, "file")}, +${side.diff.added} / -${side.diff.removed}`,
+    ];
+    lines.push(`| ${cells.map(cell).join(" | ")} |`);
+  }
+  return lines;
+}
+
+/** One fixture folded into `<details>`: its table, its sides, their final messages, their directories. */
+function fixtureMarkdown(fixture: ReportFixture): string[] {
+  const verdicts = fixtureStatus(fixture) ?? verdictCells(fixture).join(" · ");
+  const lines: string[] = [`<details><summary>${fixture.fixture}: ${verdicts}</summary>`, ""];
+  if (fixture.error !== null) {
+    lines.push(`> **error:** ${cell(fixture.error)}`);
+    lines.push("");
+  }
+  if (fixture.comparison !== null) {
+    lines.push(formatComparisonMarkdown(fixture.comparison));
+    lines.push("");
+  }
+  const sides = (["previous", "candidate"] as const).flatMap((name): Array<[string, SideSummary]> => {
+    const side = fixture.sides[name];
+    return side === null ? [] : [[name, side]];
+  });
+  if (sides.length > 0) {
+    lines.push(...sidesMarkdown(sides));
+    lines.push("");
+    for (const [name, side] of sides) {
+      lines.push(`**${name}** final message:`);
+      lines.push("");
+      const message = side.finalMessage.trimEnd();
+      lines.push(...(message === "" ? ["_(none)_"] : message.split("\n").map((line) => `> ${line}`.trimEnd())));
+      lines.push("");
+    }
+    lines.push("Run directories:");
+    lines.push("");
+    for (const [name, side] of sides) lines.push(`- ${name}: \`${side.runDir}\``);
+    lines.push("");
+  }
+  lines.push("</details>");
+  return lines;
+}
+
+/**
+ * The whole report as GitHub-flavoured markdown, for `report.md`, `--detail`, `compare
+ * --markdown` and a PR comment: the header, the three verdict lines, warnings, the roll-up
+ * table, then each fixture folded into `<details>` with the judges' reasons in full.
+ */
+export function formatReportMarkdown(report: BatchReport): string {
+  const lines: string[] = [`### ${reportHeader(report)}`, ""];
+  for (const [label, text] of verdictLines(report)) lines.push(`- **${label}** ${text}`);
+  if (report.rollup.warnings.length > 0) {
+    lines.push("");
+    for (const warning of report.rollup.warnings) lines.push(`> **warning:** ${cell(warning)}`);
+  }
+  if (report.rollup.rows.length > 0) {
+    lines.push("");
+    lines.push(...rollupMarkdown(report.rollup));
+  }
+  for (const fixture of report.fixtures) {
+    lines.push("");
+    lines.push(...fixtureMarkdown(fixture));
   }
   return lines.join("\n");
 }

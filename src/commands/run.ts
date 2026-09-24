@@ -20,14 +20,8 @@ import {
   requireRepo,
   type LoadedFixture,
 } from "../preflight.js";
-import {
-  formatBatch,
-  formatBatchPlan,
-  formatDirtyHarness,
-  formatProgress,
-  formatSameHarness,
-  type BatchFixtureReport,
-} from "../print.js";
+import { formatBatchPlan, formatDirtyHarness, formatProgress, formatRunsFinished, formatSameHarness } from "../print.js";
+import { buildReport } from "../report.js";
 import {
   ENVIRONMENTS,
   runStamp,
@@ -39,10 +33,10 @@ import {
 } from "../run-record.js";
 import { telemetry } from "../telemetry.js";
 import { withWorkspace, type Workspace } from "../workspace.js";
-import { loadJudgement } from "./compare.js";
+import { loadJudgement, printReport, saveReport, type ReportOutput } from "./compare.js";
 import { defaultDeps, judgePair, type JudgeDeps } from "./judge.js";
 
-export type RunOptions = {
+export type RunOptions = ReportOutput & {
   cwd: string;
   /** Fixture ids to run; none means every fixture (or every fixture carrying one of `tags`). */
   fixtureIds: string[];
@@ -56,7 +50,6 @@ export type RunOptions = {
   maxTurns?: number | undefined;
   model?: string | undefined;
   keep: boolean;
-  json: boolean;
   /** Run the configured judges on each pair as soon as its two sides are in. */
   judge: boolean;
 };
@@ -109,8 +102,8 @@ type Side = {
  * stamp: with the harness at the merge base with the base branch (`previous`) and with the
  * harness at HEAD (`candidate`). Each side gets its own workspace and run directory; while
  * they run, one progress line per event goes to stderr. Each fixture is compared (and, with
- * --judge, judged) as soon as its two sides are in, and the output comes in fixture order:
- * one fixture's summaries and table alone, or several under their roll-up.
+ * --judge, judged) as soon as its two sides are in. At the end the batch's report is written
+ * under `.harnessbench/runs/<stamp>/` and printed, fixtures in order.
  */
 export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): Promise<RunBatchResult> {
   // One clock for every side's progress lines, started before any preflight.
@@ -231,16 +224,27 @@ export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): P
     })),
     rollup: rollup(outcomes.flatMap((each) => (each.comparison === null ? [] : [each.comparison]))),
   };
-  if (options.json) console.log(JSON.stringify(result, null, 2));
-  else {
-    const reports: BatchFixtureReport[] = outcomes.map(({ fixture, sides, comparison, error }) => ({
+  const runs = outcomes.reduce((sum, each) => sum + each.sides.length, 0);
+  console.error(formatRunsFinished(runs, Date.now() - invokedAt));
+
+  const side = (sides: SideResult[], environment: Environment): RunRecord | null =>
+    sides.find((each) => each.record.environment === environment)?.record ?? null;
+  const report = buildReport(
+    stamp,
+    outcomes.map(({ fixture, sides, comparison, error }) => ({
       fixture,
-      sides,
+      previous: side(sides, "previous"),
+      candidate: side(sides, "candidate"),
       comparison,
       error,
-    }));
-    console.log(formatBatch(result.rollup, reports, head.sha));
-  }
+    })),
+    {
+      headSha: head.sha,
+      harness: { previous: previous.sha, candidate: head.sha },
+      agent: { name: adapter.name, model: agentConfig.model },
+    },
+  );
+  printReport(report, options, saveReport(root, report, options.stepSummary));
 
   // Every fixture had its say; now the failures, all of them, as the one error the shell sees.
   const failures = outcomes.flatMap((each) => each.failures);
@@ -274,7 +278,7 @@ function limiter(max: number | undefined): <T>(task: () => Promise<T>) => Promis
   };
 }
 
-type SideResult = { record: RunRecord; stderrPath: string };
+type SideResult = { record: RunRecord };
 
 /** One fixture's sides as they settled, plus what the batch adds to it once the pair is in. */
 type FixtureOutcome = {
@@ -386,7 +390,7 @@ async function runSide(side: Side): Promise<SideResult> {
       return finished;
     },
   );
-  return { record, stderrPath };
+  return { record };
 }
 
 /** The top-level figures the agent reported for the whole run. */

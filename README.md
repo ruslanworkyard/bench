@@ -157,13 +157,36 @@ npx harnessbench run --judge                          # and judge each pair as i
 For each fixture, `run` drives the agent twice on the current `HEAD`: as `previous`, with the
 harness as committed at the merge base with your base branch, and as `candidate`, with the
 harness at `HEAD`. Every side runs in its own disposable clone, at the same time; `--concurrency
-<n>` caps how many are in flight. Progress goes to stderr; the tables are printed at the end.
+<n>` caps how many are in flight. Progress goes to stderr, one line per event, then
+`6 runs finished in 05:12`. The terminal then gets a summary that fits on one screen:
 
-Everything lands in `.harnessbench/runs/<stamp>-<fixture>-<environment>/`: `run.json`,
+```
+harnessbench  2 fixtures · code 9c4c5e2 · previous cca3e7c → candidate 9c4c5e2 · claude-sonnet-5
+
+Outcome     unchanged 2
+Efficiency  regressed: Turns 2, Cost 2, Tokens 2, Reads before first edit 1 · improved: Exploring 1
+Judges      candidate 5 · previous 1 · tie 0
+
+holiday-api-client  code quality candidate · engineering practices candidate · test quality candidate
+list-runs           code quality previous  · engineering practices candidate · test quality candidate
+
+report  .harnessbench/runs/20260924-052122/report.md
+```
+
+**Outcome** is the worse of the outcome and tests rows per fixture, **Efficiency** lists every
+other mechanical row that moved (how many fixtures), **Judges** counts preferences across all
+fixtures and judges. The full report — the roll-up table, then per fixture the comparison table
+with the judges' reasons, both sides' figures and final messages, and the run directories — is
+written to `.harnessbench/runs/<stamp>/report.md` (GitHub-flavoured markdown, ready for a PR
+comment) and `report.json`. `--detail` prints the markdown instead of the summary; `--json`
+prints `report.json` exactly, and nothing else on stdout.
+
+Each run lands in `.harnessbench/runs/<stamp>-<fixture>-<environment>/`: `run.json`,
 `diff.patch`, `transcript.jsonl`, `setup.log`, `test.log` and the agent's raw output. The
 `stamp` (`YYYYMMDD-HHMMSS`) is shared by every run of one invocation.
 
-Useful flags: `--keep` (leave the workspaces on disk), `--max-turns`, `--model`, `--json`.
+Useful flags: `--keep` (leave the workspaces on disk), `--max-turns`, `--model`, `--detail`,
+`--json`.
 Exit codes report the agent, not your tests: 0 completed, 2 timeout, 3 error, 4 turn limit,
 1 anything else, 130 interrupted. A failing test suite is a result, not an error.
 
@@ -177,7 +200,8 @@ npx harnessbench compare <previous-run-id> <candidate-run-id>  # any pair
 npx harnessbench judge --fixture ttl-cache                      # judge (or re-judge) a pair
 ```
 
-One row per criterion; lower is better for every count. A delta counts as `improved` or
+Both print the same summary as `run` and rewrite the batch's `report.md` and `report.json`, so
+the files always carry the latest verdicts. One row per criterion; lower is better for every count. A delta counts as `improved` or
 `regressed` only when it clears both a relative threshold and a small absolute floor —
 everything else reads `unchanged`, because one run per side is not a distribution. With several
 fixtures the output opens with a roll-up naming which fixtures moved on each criterion; there is
@@ -185,15 +209,35 @@ no composite score.
 
 `compare` never calls a model, only reads what `judge` wrote, and always exits 0: it reports, it
 does not gate. `judge` is incremental — a verdict whose rubric has not changed is kept without a
-model call; `--all` re-judges everything. `--markdown` prints the tables as GitHub-flavoured
-markdown, ready to paste into a PR.
+model call; `--all` re-judges everything. `compare --markdown` (or `--detail` on any of the
+three) prints the markdown report.
 
 ## CI
 
-*Not written yet.*
+When `GITHUB_STEP_SUMMARY` is set, `run`, `compare` and `judge` append the markdown report to
+it, so the job's summary page shows the report. Posting it on the PR is the workflow's job; the
+report's path comes from `report.json`'s `stamp`:
 
-- **GitHub Actions** — TODO
-- **Bitbucket Pipelines** — TODO
+```yaml
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the merge base with the base branch
+      - name: Benchmark the harness
+        run: npx harnessbench run --judge --json > harnessbench.json
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      - name: Locate the report
+        id: report
+        if: ${{ !cancelled() }}
+        run: echo "path=.harnessbench/runs/$(jq -r .stamp harnessbench.json)/report.md" >> "$GITHUB_OUTPUT"
+      - uses: marocchino/sticky-pull-request-comment@v2
+        if: ${{ !cancelled() }}
+        with:
+          header: harnessbench
+          path: ${{ steps.report.outputs.path }}
+```
+
+Bitbucket Pipelines: not written yet.
 
 ## Status
 
@@ -203,6 +247,13 @@ CI integration, and more agent adapters.
 
 If you have the same problem, open an issue and describe how you'd want to test your harness.
 Fixture design is where real examples help most.
+
+## Changelog
+
+- Unreleased: `run`, `compare` and `judge` print a one-screen summary and write the full report
+  to `.harnessbench/runs/<stamp>/report.md` and `report.json`. `--json` on all three now prints
+  that report document; it replaces the previous per-command JSON shapes (`run`'s batch result,
+  `compare`'s comparison and batch comparison, `judge`'s comparison and judged batch).
 
 ## License
 

@@ -53,8 +53,10 @@ test("the system prompt is the rubric followed by the fixed instruction block, a
   assert.match(INSTRUCTIONS, /otherwise answer tie\./);
   assert.match(
     INSTRUCTIONS,
-    /decided it, in at most two sentences\. Answer with a JSON object with exactly two keys: "preference", whose value is "A", "B" or "tie", and "reason"\.$/,
+    /decided it, in at most two sentences\. Answer with a JSON object with exactly two keys: "preference", whose value is "A", "B" or "tie", and "reason"\. /,
   );
+  // A diff-only judge once claimed unseen code "would crash": evidence only, said last.
+  assert.match(INSTRUCTIONS, / Only cite behaviour visible in the evidence; do not assert how code that is not shown behaves\.$/);
   const prompt = model.doGenerateCalls[0]?.prompt ?? [];
   assert.equal(prompt[0]?.role, "system");
   assert.equal(prompt[0]?.content, system);

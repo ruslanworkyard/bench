@@ -75,6 +75,22 @@ Goal: an open-source npm package (`npx harnessbench`) people adopt. Quality over
   stamp and what is missing. The roll-up across fixtures is one row per criterion listing the
   fixture ids per classification (counts always come with names); no composite, no row summing
   across criteria.
+- **A batch has one report object** (`BatchReport` in `report.ts`, pure, `schema: 1`): header
+  shas, agent, judge, roll-up, and per fixture its comparison, both sides as `SideSummary` data
+  and any error. Everything renders it: the terminal summary (`formatSummaryReport`), the
+  markdown (`formatReportMarkdown`), JSON (`JSON.stringify(report, null, 2)`). It lives at
+  `runs/<stamp>/report.md` + `report.json`, written atomically (temp file, rename) by `run` and
+  rewritten by `compare` and `judge` whenever they address that batch — batch addressing, or a
+  pair whose two runs share a stamp (then stdout shows the pair, the file the whole batch).
+  `$GITHUB_STEP_SUMMARY` gets the markdown appended; the CLI reads that variable, commands take
+  it as an option. Nothing else is GitHub-specific.
+- **stdout rules for `run`, `compare`, `judge`:** stdout carries the report and nothing else —
+  the one-screen summary by default (header, warnings, three verdict lines Outcome / Efficiency
+  / Judges, one line per fixture with each judge's preference, the report path), the markdown
+  with `--detail` (and `compare --markdown`), the report document with `--json`. No reasons or
+  per-side detail on the terminal. Progress, warnings before the run and `N runs finished in
+  mm:ss` go to stderr. The Judges line sums preferences across judges by request; it is a count
+  line, not a composite.
 
 ## File relationship between the tool and a host repo
 
@@ -93,6 +109,8 @@ Goal: an open-source npm package (`npx harnessbench`) people adopt. Quality over
                                         directory of one `run` invocation shares <ts> (the "stamp")
     runs/<ts>-<fixture>-judge/          the verdicts on that pair, gitignored: judge.json, and per
                                         judge id prompt.txt (as sent) + response.json (raw reply)
+    runs/<ts>/                          the batch's report, gitignored: report.md + report.json, written
+                                        by run and rewritten by compare/judge; never matches RUN_ID
 ```
 The tool reads the host through git, writes only under `.harnessbench/`, and works in a temp
 worktree (`$TMPDIR/harnessbench/<run>/tree`) with an isolated `HOME` for the agent.
@@ -163,9 +181,13 @@ worktree (`$TMPDIR/harnessbench/<run>/tree`) with an isolated `HOME` for the age
   for `run` only) kills every workspace's process group and exits 130, because the detached
   agents never see the terminal's Ctrl-C.
 - **Fixture sets (2026-09-22).** `run [<fixture-id>...] [--tag <tag>]... [--concurrency <n>]`
-  runs a batch under one stamp, fixtures independent, output as a roll-up plus per-fixture
-  sections (text, markdown with `<details>`, or one `RunBatchResult` JSON shape whatever the
-  count).
+  runs a batch under one stamp, fixtures independent.
+- **Batch reports (2026-09-24).** One `BatchReport` per batch, on disk as
+  `runs/<stamp>/report.md` + `report.json`; the terminal gets a one-screen summary, `--detail`
+  the markdown, `--json` the document (replacing the per-command JSON shapes). Appended to
+  `$GITHUB_STEP_SUMMARY` when set; the README has a sticky-comment workflow step. The old text
+  renderers (`formatRun`, `formatComparison`, `formatRollup`, `formatBatch*`, `formatJudging`)
+  are gone. Judge instructions now forbid asserting how unseen code behaves.
 
 ## Deliberately not built
 
@@ -184,8 +206,8 @@ classification in telemetry, credential encryption or `.env.ci` variants.
    `judge` on that pair with a real model: read `prompt.txt` and the verdicts by hand; revise
    the three draft rubrics from what the model actually did with them.
 3. Position swap as an opt-in second judge call.
-4. GitHub Action that comments `compare --markdown` on PRs touching harness files.
-   Cache `previous` by harness hash so a PR pays only for the candidate side.
+4. Gating and exit codes on the report (next task). A packaged GitHub Action around the README's
+   workflow step; cache `previous` by harness hash so a PR pays only for the candidate side.
 5. More agent adapters (Codex, Aider, Gemini CLI, OpenCode, Pi): implement `AgentAdapter` and
    register it in `agents/index.ts`. Note `detect/agents.ts` knows more binaries than we have
    adapters for — it reports what is on PATH; only a binary with an adapter is offered.

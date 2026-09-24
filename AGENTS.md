@@ -22,9 +22,10 @@ Every file has one job. Find the job, then the file; do not search.
 | `preflight.ts` | `requireX(...)` checks that throw `CliError` with a fix in the message |
 | `print.ts` | the only formatter: `format*(data): string`, aligned columns via `padEnd` |
 | `config.ts` | `.harnessbench/config.json`: shape, defaults, `validate`, `load` |
-| `run-record.ts` | `run.json` shape, `readRunRecord`, `writeRunRecord`, `RUNS_DIR` layout |
+| `run-record.ts` | `run.json` shape, `readRunRecord`, `writeRunRecord`, `RUNS_DIR` layout, `writeReport` |
 | `fixtures.ts`, `judges.ts` | the two catalogues under `.harnessbench/`; same loading pattern |
 | `compare.ts`, `telemetry.ts` | pure: records in, rows or stats out |
+| `report.ts` | pure: records and comparisons in, the batch's `BatchReport` out |
 | `workspace.ts` | the disposable clone an agent runs in |
 | `agents/` | agent adapters behind `AgentAdapter`; `claude-code-stream.ts` parses the stream |
 | `detect/` | pure detection, `Detection<T> | null`, never writes |

@@ -25,17 +25,21 @@ import {
   requireRepo,
   type ResolvedJudge,
 } from "../preflight.js";
-import { formatBatch, formatComparison, formatJudging, type BatchFixtureReport } from "../print.js";
 import { RUN_ID, runStamp, type Environment, type RunRecord } from "../run-record.js";
 import {
+  batchReport,
   compareBatchRecords,
   findJudgeRecord,
-  headShaOf,
   loadBatch,
   loadJudgement,
   loadPair,
   orderPair,
+  pairReport,
+  printReport,
+  rewriteBatchReport,
+  saveReport,
   type BatchComparison,
+  type ReportOutput,
 } from "./compare.js";
 
 /**
@@ -71,12 +75,11 @@ export type JudgeRecord = {
   verdicts: VerdictRecord[];
 };
 
-export type JudgeOptions = {
+export type JudgeOptions = ReportOutput & {
   cwd: string;
   /** Explicit pair, in any order; when absent, the latest pair for `fixture`. */
   runIds?: readonly [string, string] | undefined;
   fixture?: string | undefined;
-  json: boolean;
   /** Judge every configured judge, even one whose verdict is fresh. */
   all: boolean;
 };
@@ -96,16 +99,15 @@ export async function judge(options: JudgeOptions, deps: JudgeDeps = defaultDeps
   const [previous, candidate] = loadPair(root, "judge", options);
   const result = await judgePair(root, config, previous, candidate, deps, options.all);
   const comparison = compare(previous, candidate, loadJudgement(root, config, previous, candidate));
-  if (options.json) console.log(JSON.stringify(comparison, null, 2));
-  else console.log(`${formatJudging(result)}\n\n${formatComparison(comparison)}`);
+  const path = rewriteBatchReport(root, config, previous, candidate, options.stepSummary);
+  printReport(pairReport(previous, candidate, comparison), options, path);
   return result.record;
 }
 
-export type JudgeBatchOptions = {
+export type JudgeBatchOptions = ReportOutput & {
   cwd: string;
   /** The batch with this stamp; when absent, the latest batch with at least one complete pair. */
   stamp?: string | undefined;
-  json: boolean;
   all: boolean;
 };
 
@@ -116,7 +118,7 @@ export type JudgeBatchResult = Omit<BatchComparison, "fixtures"> & {
 
 /**
  * Every complete pair of a batch judged at once, each as `judgePair` would alone, then the
- * batch's tables under their roll-up. A pair with a missing side, or one a judge refuses, is
+ * batch's report written and printed. A pair with a missing side, or one a judge refuses, is
  * listed as skipped with the reason; it never stops the others.
  */
 export async function judgeBatch(options: JudgeBatchOptions, deps: JudgeDeps = defaultDeps): Promise<JudgeBatchResult> {
@@ -152,16 +154,8 @@ export async function judgeBatch(options: JudgeBatchOptions, deps: JudgeDeps = d
   });
   const result: JudgeBatchResult = { ...compared, fixtures };
 
-  if (options.json) console.log(JSON.stringify(result, null, 2));
-  else {
-    const reports: BatchFixtureReport[] = fixtures.map(({ fixture, judging, comparison, error }) => ({
-      fixture,
-      ...(judging === null ? {} : { judging }),
-      comparison,
-      error,
-    }));
-    console.log(formatBatch(result.rollup, reports, headShaOf(result)));
-  }
+  const report = batchReport(batch, result);
+  printReport(report, options, saveReport(root, report, options.stepSummary));
   return result;
 }
 

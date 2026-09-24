@@ -2,18 +2,17 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import type { Comparison, Row } from "./compare.js";
-import type { Rollup } from "./compare.js";
+import { rollup } from "./compare.js";
 import {
   NOISE_LINE,
   ROLLUP_LINE,
-  formatBatch,
-  formatBatchMarkdown,
-  formatComparison,
   formatComparisonMarkdown,
   formatProgress,
-  formatRollup,
-  formatRun,
+  formatReportMarkdown,
+  formatRunsFinished,
+  formatSummaryReport,
 } from "./print.js";
+import { buildReport } from "./report.js";
 import type { RunRecord } from "./run-record.js";
 
 function row(patch: Partial<Row> & { id: string; label: string }): Row {
@@ -40,41 +39,6 @@ function comparison(warnings: string[] = []): Comparison {
 }
 
 /** The column at which `word` starts on each line that contains it. */
-function columnOf(lines: string[], word: string): number[] {
-  return lines.filter((line) => line.includes(word)).map((line) => line.indexOf(word));
-}
-
-test("formatComparison aligns every column to its widest value", () => {
-  const text = formatComparison(comparison());
-  const lines = text.split("\n");
-
-  assert.equal(lines[0], "harnessbench compare  ttl-cache · code 0123456");
-  assert.ok(lines.includes("Harness    previous 9c21e63 → candidate 0123456"));
-  assert.ok(lines.includes("Model      previous claude-sonnet-4-5 → candidate not reported"));
-  assert.ok(lines.includes("Runs       20260919-031455-ttl-cache-previous → 20260919-031455-ttl-cache-candidate"));
-  assert.ok(lines.includes(NOISE_LINE));
-  assert.ok(!text.includes("warning:"));
-
-  const table = lines.slice(lines.indexOf(NOISE_LINE) + 2);
-  assert.equal(table.length, 5);
-  // Every column starts where it starts on the widest row: the arrow, the delta, the word.
-  const arrows = table.map((line) => line.indexOf("→"));
-  assert.equal(new Set(arrows).size, 1, `arrows at ${arrows.join(", ")}`);
-  const words = table.map((line) => line.search(/unchanged|improved|regressed|n\/a/));
-  assert.equal(new Set(words).size, 1, `classifications at ${words.join(", ")}`);
-  assert.equal(columnOf(table, "-21%")[0], columnOf(table, "+1,532%")[0]);
-  // The note sits after the classification, and lines carry no trailing padding.
-  assert.match(table[3] as string, /Tool calls\s+18\s+→ 15\s+-3\s+unchanged\s+within noise$/);
-  for (const line of table) assert.equal(line, line.trimEnd());
-});
-
-test("formatComparison prints warnings after the noise line, each prefixed", () => {
-  const lines = formatComparison(comparison(["models differ", "same harness"])).split("\n");
-  const at = lines.indexOf(NOISE_LINE);
-  assert.equal(lines[at + 1], "warning: models differ");
-  assert.equal(lines[at + 2], "warning: same harness");
-  assert.equal(lines[at + 3], "");
-});
 
 test("formatComparisonMarkdown renders a valid GitHub table with the same content", () => {
   const text = formatComparisonMarkdown(comparison(["models | differ"]));
@@ -144,30 +108,6 @@ function runRecord(patch: Partial<RunRecord> = {}): RunRecord {
   };
 }
 
-test("formatRun shows the setup command only when one ran", () => {
-  const lines = formatRun(runRecord(), "/nonexistent/agent.stderr.log").split("\n");
-  assert.ok(lines.includes("Setup      npm ci → ok in 24s"), lines.join("\n"));
-
-  const failed = runRecord({ setup: { command: "npm ci", exitCode: 1, durationMs: 3000, timedOut: false } });
-  assert.ok(formatRun(failed, "/nonexistent").includes("Setup      npm ci → failed (exit 1) in 3s"));
-
-  const none = formatRun(runRecord({ setup: null }), "/nonexistent").split("\n");
-  assert.equal(none.some((line) => line.startsWith("Setup")), false);
-});
-
-test("formatRun summarises threads and phases on one line each", () => {
-  const lines = formatRun(runRecord(), "/nonexistent/agent.stderr.log").split("\n");
-
-  assert.ok(lines.includes("Turns      23   Tool calls  41 (Read 18, Edit 9, Bash 14)   Tool failures 2"));
-  assert.ok(lines.includes("Threads    main 20 turns / 30 calls · Explore on claude-haiku-4-5: 11 calls · Task on model not reported: 1 call"));
-  assert.ok(lines.includes("Phases     exploring 1m02s · building 2m30s · verifying 40s"));
-
-  const { telemetry: _dropped, ...earlier } = runRecord();
-  const old = formatRun(earlier as RunRecord, "/nonexistent/agent.stderr.log").split("\n");
-  assert.ok(old.includes("Threads    not recorded"));
-  assert.ok(old.includes("Phases     not recorded"));
-});
-
 /** The mechanical rows above plus two judge rows, one with a long note. */
 function withJudges(judged: Comparison["judged"], note: string): Comparison {
   const c = comparison();
@@ -186,49 +126,6 @@ const LONG_REASON =
   "B's TtlCache keeps the existing error type in read.ts while A introduces a second one; " +
   "B's eviction test covers expiry through the public get/set — rubric changed since this verdict; run harnessbench judge --fixture ttl-cache";
 
-test("formatComparison puts the judge rows under their own heading, in the same columns, with the note wrapped", () => {
-  const text = formatComparison(withJudges({ provider: "anthropic", model: "claude-sonnet-4-5" }, LONG_REASON));
-  const lines = text.split("\n");
-
-  const heading = lines.indexOf("judged by anthropic claude-sonnet-4-5");
-  assert.notEqual(heading, -1);
-  assert.equal(lines[heading - 1], "", "a blank line separates the judge rows from the mechanical ones");
-  assert.match(lines[heading - 2] as string, /^Duration/);
-
-  const codeQuality = lines[heading + 1] as string;
-  assert.match(codeQuality, /^Code quality\s+candidate preferred\s+improved\s+B's TtlCache/);
-  // Same columns as the mechanical rows: the classification word starts where it does above.
-  const words = [...lines.slice(heading - 6, heading - 1), codeQuality].map((line) => line.search(/unchanged|improved|regressed|n\/a/));
-  assert.equal(new Set(words).size, 1, `classifications at ${words.join(", ")}`);
-  // A bare arrow is not printed for an empty candidate cell.
-  assert.doesNotMatch(codeQuality, /→/);
-
-  // The note wraps to 100 columns, or to a 40-wide note column when the other columns leave
-  // less than that; continuation lines start at the note column.
-  const noteAt = codeQuality.indexOf("B's TtlCache");
-  const limit = Math.max(100, noteAt + 40);
-  const noteLines = [codeQuality];
-  for (let i = heading + 2; i < lines.length && lines[i]?.startsWith(" "); i++) noteLines.push(lines[i] as string);
-  assert.ok(noteLines.length >= 3, `expected a wrapped note, got:\n${noteLines.join("\n")}`);
-  for (const line of noteLines) assert.ok(line.length <= limit, `over ${limit} columns: ${line}`);
-  assert.ok(noteLines.some((line) => line.length > limit - 12), "lines are filled, not wrapped early");
-  for (const line of noteLines.slice(1)) {
-    assert.equal(line.search(/\S/), noteAt, `continuation not aligned: ${JSON.stringify(line)}`);
-  }
-  assert.equal(noteLines.map((line) => line.slice(noteAt)).join(" "), LONG_REASON);
-
-  const notJudged = lines[heading + 1 + noteLines.length] as string;
-  assert.match(notJudged, /^Test quality\s+n\/a\s+not judged; run harnessbench judge$/);
-  assert.equal(lines[heading + 2 + noteLines.length], `${" ".repeat(noteAt)}--fixture ttl-cache`);
-  // The mechanical rows are not wrapped.
-  assert.equal(lines.filter((line) => line.startsWith("Tool calls")).length, 1);
-});
-
-test("formatComparison says judges: not run when no verdict exists, and nothing at all without judge rows", () => {
-  const text = formatComparison(withJudges(null, ""));
-  assert.match(text, /\n\njudges: not run\nCode quality/);
-  assert.doesNotMatch(formatComparison(comparison()), /judge/);
-});
 
 test("formatComparisonMarkdown puts the judge rows in the same table with the whole reason, under a sentence", () => {
   const text = formatComparisonMarkdown(withJudges({ provider: "anthropic", model: "claude-sonnet-4-5" }, LONG_REASON));
@@ -277,94 +174,139 @@ test("formatProgress puts one clock, an aligned fixture column and an aligned en
   assert.equal(formatProgress(0, "ttl-cache", 9, "previous", { kind: "started" }), "[00:00] ttl-cache  previous   started");
 });
 
-// --- roll-up ---
 
-function rollupOf(): Rollup {
+// --- the batch report ---
+
+const STAMP = "20260924-052122";
+const PREVIOUS_SHA = "9c21e6389abcdef0123456789abcdef01234567";
+
+function pairOf(fixture: string): { previous: RunRecord; candidate: RunRecord } {
   return {
-    fixtures: 3,
-    rows: [
-      { id: "turns", label: "Turns", improved: ["list-runs", "ttl-cache"], regressed: ["announcements"], unchanged: [], na: [] },
-      { id: "readsBeforeFirstEdit", label: "Reads before first edit", improved: ["list-runs", "ttl-cache", "announcements"], regressed: [], unchanged: [], na: [] },
-      { id: "costUsd", label: "Cost", improved: [], regressed: [], unchanged: ["list-runs"], na: ["ttl-cache", "announcements"] },
-      { id: "judge.code-quality", label: "Code quality", improved: ["ttl-cache"], regressed: ["list-runs"], unchanged: ["announcements"], na: [] },
-    ],
-    warnings: [],
+    previous: runRecord({
+      fixture,
+      environment: "previous",
+      runId: `${STAMP}-${fixture}-previous`,
+      harness: { ref: PREVIOUS_SHA, sha: PREVIOUS_SHA, files: ["CLAUDE.md"], hash: "previous-hash" },
+      finalMessage: "Wrote the client.\nTests pass.",
+    }),
+    candidate: runRecord({ fixture, runId: `${STAMP}-${fixture}-candidate` }),
   };
 }
 
-const SHA = "0123456789abcdef0123456789abcdef01234567";
+/** A comparison of `fixture` with the given mechanical and judge classifications, in table order. */
+function judgedComparison(fixture: string, rows: Array<[string, string, Row["classification"]]>, warnings: string[] = []): Comparison {
+  return {
+    ...comparison(warnings),
+    fixture,
+    judged: { provider: "anthropic", model: "claude-sonnet-4-5" },
+    rows: rows.map(([id, label, classification]) =>
+      row({ id, label, classification, ...(id.startsWith("judge.") ? { previous: "", candidate: "", note: id === "judge.code-quality" ? LONG_REASON : "short" } : {}) }),
+    ),
+  };
+}
 
-test("formatRollup aligns the criterion column and lists each fixture behind every count", () => {
-  const lines = formatRollup(rollupOf(), SHA).split("\n");
-
-  assert.deepEqual(lines.slice(0, 4), ["harnessbench rollup  3 fixtures · code 0123456", "", ROLLUP_LINE, ""]);
-  assert.deepEqual(lines.slice(4), [
-    "Turns                    improved 2 [list-runs, ttl-cache]   regressed 1 [announcements]",
-    "Reads before first edit  improved 3 [list-runs, ttl-cache, announcements]",
-    "Cost                     unchanged 1 [list-runs]   n/a 2 [ttl-cache, announcements]",
-    "Code quality             candidate 1 [ttl-cache]   previous 1 [list-runs]   tie 1 [announcements]",
+function batch(warnings: string[] = []) {
+  const holiday = judgedComparison("holiday-api-client", [
+    ["outcome", "Outcome", "unchanged"],
+    ["tests", "Tests", "unchanged"],
+    ["turns", "Turns", "regressed"],
+    ["phases.exploringMs", "Exploring", "improved"],
+    ["costUsd", "Cost", "unchanged"],
+    ["judge.code-quality", "Code quality", "improved"],
+    ["judge.test-quality", "Test quality", "improved"],
   ]);
-  // Every first cell starts in the same column: the widest label plus two spaces.
-  const cellAt = lines.slice(4).map((line) => line.search(/ {2}\S/) + 2);
-  assert.equal(new Set(cellAt).size, 1, `cells at ${cellAt.join(", ")}`);
-  assert.equal(cellAt[0], "Reads before first edit".length + 2);
+  const list = judgedComparison(
+    "list-runs",
+    [
+      ["outcome", "Outcome", "unchanged"],
+      ["tests", "Tests", "n/a"],
+      ["turns", "Turns", "regressed"],
+      ["phases.exploringMs", "Exploring", "unchanged"],
+      ["costUsd", "Cost", "regressed"],
+      ["judge.code-quality", "Code quality", "regressed"],
+      ["judge.test-quality", "Test quality", "improved"],
+    ],
+    warnings,
+  );
+  return buildReport(STAMP, [
+    { fixture: "broken", previous: null, candidate: null, comparison: null, error: "broken: previous: setup command `npm ci` exited with code 1; the agent was not started.\nIts output is in setup.log." },
+    { fixture: "holiday-api-client", ...pairOf("holiday-api-client"), comparison: holiday, error: null },
+    { fixture: "list-runs", ...pairOf("list-runs"), comparison: list, error: null },
+  ]);
+}
+
+test("formatSummaryReport: header, three verdict lines, one aligned line per fixture, the report path last", () => {
+  assert.deepEqual(formatSummaryReport(batch()).split("\n"), [
+    "harnessbench  3 fixtures · code 0123456 · previous 9c21e63 → candidate 0123456 · claude-sonnet-4-5",
+    "",
+    "Outcome     unchanged 2",
+    "Efficiency  regressed: Turns 2, Cost 1 · improved: Exploring 1",
+    "Judges      candidate 3 · previous 1 · tie 0",
+    "",
+    "broken              error: broken: previous: setup command `npm ci` exited with code 1; the agent was not started.",
+    "holiday-api-client  code quality candidate · test quality candidate",
+    "list-runs           code quality previous  · test quality candidate",
+    "",
+    `report  .harnessbench/runs/${STAMP}/report.md`,
+  ]);
 });
 
-test("formatRollup prints warnings under the noise line, and formatBatch puts the roll-up above each fixture's blocks", () => {
-  const withWarnings = { ...rollupOf(), warnings: ["ttl-cache: models differ", "announcements: same harness"] };
-  const lines = formatRollup(withWarnings, SHA).split("\n");
-  const at = lines.indexOf(ROLLUP_LINE);
-  assert.equal(lines[at + 1], "warning: ttl-cache: models differ");
-  assert.equal(lines[at + 2], "warning: announcements: same harness");
-  assert.equal(lines[at + 3], "");
+test("formatSummaryReport puts warnings above the verdict lines, never reasons; the worse of outcome and tests counts", () => {
+  const report = batch(["models differ"]);
+  const regressed = report.fixtures[2]?.comparison?.rows.find((each) => each.id === "tests");
+  if (regressed !== undefined) regressed.classification = "regressed";
+  const lines = formatSummaryReport({ ...report, rollup: rollup(report.fixtures.flatMap((each) => (each.comparison === null ? [] : [each.comparison]))) }).split("\n");
 
-  const text = formatBatch(
-    rollupOf(),
-    [
-      { fixture: "ttl-cache", comparison: comparison(), error: null },
-      { fixture: "holiday-api-client", comparison: null, error: "holiday-api-client: candidate side missing" },
-    ],
-    SHA,
-  );
-  assert.match(text, /^harnessbench rollup {2}3 fixtures/);
-  assert.match(text, /\n\n── ttl-cache ──\n\nharnessbench compare {2}ttl-cache · code 0123456\n/);
-  assert.match(text, /\n\n── holiday-api-client ──\n\nerror: holiday-api-client: candidate side missing$/);
-
-  // One fixture: its blocks alone, no roll-up, no heading.
-  const single = formatBatch(rollupOf(), [{ fixture: "ttl-cache", comparison: comparison(), error: null }], SHA);
-  assert.equal(single, formatComparison(comparison()));
+  assert.equal(lines[2], "warning: list-runs: models differ");
+  assert.equal(lines[3], "Outcome     regressed 1 · unchanged 1");
+  assert.ok(!lines.some((line) => line.includes("short") || line.includes("TtlCache")), "no judge reason on the terminal");
 });
 
-test("formatBatchMarkdown renders the roll-up as a table of fixture names, then each fixture's table inside <details>", () => {
-  const text = formatBatchMarkdown(
-    { ...rollupOf(), warnings: ["ttl-cache: models | differ"] },
-    [
-      { fixture: "ttl-cache", comparison: comparison(), error: null },
-      { fixture: "holiday-api-client", comparison: null, error: "holiday-api-client: candidate side missing" },
-    ],
-    SHA,
-  );
+test("formatSummaryReport with nothing that moved and no judges says so in one word each", () => {
+  const quiet = { ...comparison(), rows: comparison().rows.map((each) => ({ ...each, classification: "unchanged" as const })) };
+  const report = buildReport(STAMP, [{ fixture: "ttl-cache", ...pairOf("ttl-cache"), comparison: quiet, error: null }]);
+  const lines = formatSummaryReport(report).split("\n");
+  assert.equal(lines[3], "Efficiency  unchanged");
+  assert.equal(lines[4], "Judges      none configured");
+  assert.equal(lines[6], "ttl-cache  no judges configured");
+});
+
+test("formatReportMarkdown: verdict list, roll-up table, one <details> per fixture with full reasons, sides and final messages", () => {
+  const text = formatReportMarkdown(batch(["models | differ"]));
   const lines = text.split("\n");
 
-  assert.equal(lines[0], "### harnessbench: 3 fixtures on code 0123456");
+  assert.equal(lines[0], "### harnessbench  3 fixtures · code 0123456 · previous 9c21e63 → candidate 0123456 · claude-sonnet-4-5");
+  assert.deepEqual(lines.slice(2, 5), [
+    "- **Outcome** unchanged 2",
+    "- **Efficiency** regressed: Turns 2, Cost 1 · improved: Exploring 1",
+    "- **Judges** candidate 3 · previous 1 · tie 0",
+  ]);
+  assert.ok(lines.includes("> **warning:** list-runs: models \\| differ"));
   assert.ok(lines.includes(`_${ROLLUP_LINE}_`));
-  assert.ok(lines.includes("> **warning:** ttl-cache: models \\| differ"));
-  const header = lines.indexOf("| Criterion | Improved | Regressed | Unchanged | n/a |");
-  assert.notEqual(header, -1);
-  assert.equal(lines[header + 1], "|---|---|---|---|---|");
-  assert.equal(lines[header + 2], "| Turns | list-runs, ttl-cache | announcements |  |  |");
-  assert.equal(lines[header + 4], "| Cost |  |  | list-runs | ttl-cache, announcements |");
-  assert.equal(lines[header + 5], "| Code quality | ttl-cache | list-runs | announcements |  |");
+  assert.ok(lines.includes("| Criterion | Improved | Regressed | Unchanged | n/a |"));
+  assert.ok(lines.includes("| Turns |  | holiday-api-client, list-runs |  |  |"));
+  assert.ok(lines.indexOf("| Criterion | Improved | Regressed | Unchanged | n/a |") < lines.findIndex((line) => line.startsWith("<details>")));
 
-  const details = lines.map((line, i) => [line, i] as const).filter(([line]) => line.startsWith("<details>"));
-  assert.deepEqual(details.map(([line]) => line), ["<details><summary>ttl-cache</summary>", "<details><summary>holiday-api-client</summary>"]);
-  const [first, second] = details.map(([, i]) => i) as [number, number];
-  // A blank line on each side of the table, so GitHub renders markdown inside the block.
-  assert.equal(lines[first - 1], "");
-  assert.equal(lines[first + 1], "");
-  assert.equal(lines[first + 2], "### harnessbench: `ttl-cache`");
-  assert.equal(lines[second + 2], "> **error:** holiday-api-client: candidate side missing");
-  assert.equal(lines.filter((line) => line === "</details>").length, 2);
-  assert.equal(lines.at(-1), "</details>");
-  assert.equal(lines.at(-2), "");
+  assert.deepEqual(lines.filter((line) => line.startsWith("<details>")), [
+    "<details><summary>broken: error: broken: previous: setup command `npm ci` exited with code 1; the agent was not started.</summary>",
+    "<details><summary>holiday-api-client: code quality candidate · test quality candidate</summary>",
+    "<details><summary>list-runs: code quality previous · test quality candidate</summary>",
+  ]);
+  assert.equal(lines.filter((line) => line === "</details>").length, 3);
+  assert.ok(lines.includes(`| Code quality |  |  |  | improved | ${LONG_REASON} |`), "the whole reason, in the note column");
+  assert.ok(lines.includes("| Side | Outcome | Duration | Turns | Tool calls | Tokens | Cost | Setup | Tests | Changes |"));
+  assert.ok(
+    lines.includes(
+      "| previous | completed | 4m12s | 23 | 41 (Read 18, Edit 9, Bash 14), 2 failed | in 1,203, out 18,940, cache read 402,113, cache write 10,004 | $0.38 | npm ci → ok in 24s | npm test → passed in 12s | 5 files, +212 / -7 |",
+    ),
+  );
+  assert.match(text, /\*\*previous\*\* final message:\n\n> Wrote the client\.\n> Tests pass\.\n/);
+  assert.match(text, /\*\*candidate\*\* final message:\n\n> Added a TTL cache\.\n/);
+  assert.ok(lines.includes(`- candidate: \`.harnessbench/runs/${STAMP}-list-runs-candidate\``));
+  assert.ok(lines.includes("> **error:** broken: previous: setup command `npm ci` exited with code 1; the agent was not started. Its output is in setup.log."));
+});
+
+test("formatRunsFinished is one line with the count and the wall clock", () => {
+  assert.equal(formatRunsFinished(6, 312_400), "6 runs finished in 05:12");
+  assert.equal(formatRunsFinished(1, 4_000), "1 run finished in 00:04");
 });

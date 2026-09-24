@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { compare as compareRecords, rollup, type Comparison, type JudgeInput, type Rollup } from "../compare.js";
@@ -6,13 +6,15 @@ import { RUNS_DIR, type Config } from "../config.js";
 import { CliError } from "../errors.js";
 import { requireJudge } from "../judges.js";
 import { requireConfig, requireGit, requireRepo } from "../preflight.js";
-import { formatBatch, formatBatchMarkdown, formatComparison, formatComparisonMarkdown } from "../print.js";
+import { formatReportJson, formatReportMarkdown, formatSummaryReport } from "../print.js";
+import { buildReport, type BatchReport } from "../report.js";
 import {
   ENVIRONMENTS,
   RUN_ID,
   latestBatch,
   listBatches,
   readRunRecord,
+  writeReport,
   type Batch,
   type Environment,
   type RunRecord,
@@ -21,68 +23,118 @@ import {
 // number are repeated below rather than imported.
 import type { JudgeRecord } from "./judge.js";
 
-export type CompareOptions = {
+/**
+ * How `run`, `compare` and `judge` print their report: the one-screen summary by default,
+ * the full markdown with `detail`, the report document with `json`. `stepSummary` is
+ * `$GITHUB_STEP_SUMMARY`, handed in by the CLI: the markdown is appended to it once written.
+ */
+export type ReportOutput = { json: boolean; detail?: boolean | undefined; stepSummary?: string | undefined };
+
+export type CompareOptions = ReportOutput & {
   cwd: string;
   /** Explicit pair, in any order; when absent, the latest pair for `fixture`. */
   runIds?: readonly [string, string] | undefined;
   fixture?: string | undefined;
-  json: boolean;
+  /** The same as `detail`. */
   markdown: boolean;
 };
 
 /**
  * Loads the two run records of one `run` invocation, checks they are a comparable pair, and
- * prints their delta table. Reports only: the exit code says nothing about regressions.
+ * prints their report. When the pair is one batch's, that batch's report files are rewritten.
+ * Reports only: the exit code says nothing about regressions.
  */
-export function compare(options: CompareOptions): Comparison {
+export function compare(options: CompareOptions): BatchReport {
   requireGit();
   const root = requireRepo(options.cwd);
   const config = requireConfig(root);
   const [previous, candidate] = loadPair(root, "compare", options);
   const comparison = compareRecords(previous, candidate, loadJudgement(root, config, previous, candidate));
-
-  if (options.json) console.log(JSON.stringify(comparison, null, 2));
-  else if (options.markdown) console.log(formatComparisonMarkdown(comparison));
-  else console.log(formatComparison(comparison));
-  return comparison;
+  const report = pairReport(previous, candidate, comparison);
+  const path = rewriteBatchReport(root, config, previous, candidate, options.stepSummary);
+  printReport(report, { ...options, detail: options.detail === true || options.markdown }, path);
+  return report;
 }
 
-export type CompareBatchOptions = {
+export type CompareBatchOptions = ReportOutput & {
   cwd: string;
   /** The batch with this stamp; when absent, the latest batch with at least one complete pair. */
   stamp?: string | undefined;
-  json: boolean;
+  /** The same as `detail`. */
   markdown: boolean;
 };
 
 /** One fixture of a compared batch: its table, or why it has none. */
 export type BatchFixtureComparison = { fixture: string; comparison: Comparison | null; error: string | null };
 
-/** A batch compared: the shape `--json` prints, minus what `run` adds. */
+/** A batch compared, before it becomes a report. */
 export type BatchComparison = { stamp: string; fixtures: BatchFixtureComparison[]; rollup: Rollup };
 
 /**
- * The delta tables of every complete pair in one batch, under their roll-up. A pair with a
- * missing side is listed with the reason and compared with nothing; a batch with no complete
- * pair at all is refused.
+ * The report of every complete pair in one batch, written to the batch's report files and
+ * printed. A pair with a missing side is listed with the reason and compared with nothing; a
+ * batch with no complete pair at all is refused.
  */
-export function compareBatch(options: CompareBatchOptions): BatchComparison {
+export function compareBatch(options: CompareBatchOptions): BatchReport {
   requireGit();
   const root = requireRepo(options.cwd);
   const config = requireConfig(root);
   const batch = loadBatch(root, options.stamp);
-  const result = compareBatchRecords(root, config, batch);
-  const headSha = headShaOf(result);
-
-  if (options.json) console.log(JSON.stringify(result, null, 2));
-  else if (options.markdown) console.log(formatBatchMarkdown(result.rollup, result.fixtures, headSha));
-  else console.log(formatBatch(result.rollup, result.fixtures, headSha));
-  return result;
+  const report = batchReport(batch, compareBatchRecords(root, config, batch));
+  const path = saveReport(root, report, options.stepSummary);
+  printReport(report, { ...options, detail: options.detail === true || options.markdown }, path);
+  return report;
 }
 
-/** The code a batch ran on: every record agrees, so the first complete pair's says. */
-export function headShaOf(result: BatchComparison): string {
-  return result.fixtures.find((each) => each.comparison !== null)?.comparison?.headSha ?? "";
+/** A batch's report from its pairs and their comparisons (or errors), in the batch's order. */
+export function batchReport(batch: Batch, compared: { fixtures: BatchFixtureComparison[] }): BatchReport {
+  return buildReport(
+    batch.stamp,
+    batch.pairs.map((pair, i) => {
+      const each = compared.fixtures[i] as BatchFixtureComparison;
+      return { fixture: pair.fixture, previous: pair.previous, candidate: pair.candidate, comparison: each.comparison, error: each.error };
+    }),
+  );
+}
+
+/** One addressed pair as a report of one fixture, stamped with the candidate's batch. */
+export function pairReport(previous: RunRecord, candidate: RunRecord, comparison: Comparison): BatchReport {
+  const stamp = RUN_ID.exec(candidate.runId)?.[1] ?? "";
+  return buildReport(stamp, [{ fixture: candidate.fixture, previous, candidate, comparison, error: null }]);
+}
+
+/**
+ * After a command addressed one pair: when both runs are of one batch, that whole batch's
+ * report is rebuilt and written, so the files reflect the latest judging. Returns its path;
+ * null for a pair from two different batches, which has no report file.
+ */
+export function rewriteBatchReport(
+  root: string,
+  config: Config,
+  previous: RunRecord,
+  candidate: RunRecord,
+  stepSummary: string | undefined,
+): string | null {
+  const stamp = RUN_ID.exec(previous.runId)?.[1];
+  if (stamp === undefined || stamp !== RUN_ID.exec(candidate.runId)?.[1]) return null;
+  const batch = listBatches(join(root, RUNS_DIR)).find((each) => each.stamp === stamp);
+  if (batch === undefined) return null;
+  return saveReport(root, batchReport(batch, compareBatchRecords(root, config, batch)), stepSummary);
+}
+
+/** Writes the report's files, appends the markdown to the step summary when given one, and returns the markdown's path. */
+export function saveReport(root: string, report: BatchReport, stepSummary: string | undefined): string {
+  const markdown = formatReportMarkdown(report);
+  const path = writeReport(root, report.stamp, { markdown, json: formatReportJson(report) });
+  if (stepSummary !== undefined && stepSummary !== "") appendFileSync(stepSummary, `${markdown}\n`, "utf8");
+  return path;
+}
+
+/** The report on stdout, and nothing else there: summary, markdown or JSON. */
+export function printReport(report: BatchReport, output: ReportOutput, path: string | null): void {
+  if (output.json) console.log(formatReportJson(report));
+  else if (output.detail === true) console.log(formatReportMarkdown(report));
+  else console.log(formatSummaryReport(report, path));
 }
 
 /**

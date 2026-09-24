@@ -17,7 +17,8 @@ export const INSTRUCTIONS =
   "real difference on that criterion; otherwise answer tie. Do not reward length, effort or " +
   "thoroughness for their own sake. Your reason must name the specific evidence (a file, a " +
   "hunk, a test, a message) that decided it, in at most two sentences. Answer with a JSON " +
-  'object with exactly two keys: "preference", whose value is "A", "B" or "tie", and "reason".';
+  'object with exactly two keys: "preference", whose value is "A", "B" or "tie", and "reason". ' +
+  "Only cite behaviour visible in the evidence; do not assert how code that is not shown behaves.";
 
 export type Preference = Position | "tie";
 export type Verdict = { preference: Preference; reason: string };

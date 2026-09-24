@@ -1,7 +1,8 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { Usage } from "./agents/types.js";
+import { RUNS_DIR } from "./config.js";
 import type { HarnessSnapshot } from "./detect/harness.js";
 import { CliError } from "./errors.js";
 import type { Telemetry } from "./telemetry.js";
@@ -115,6 +116,36 @@ export function readRunRecord(dir: string): RunRecord {
     );
   }
   return parsed as RunRecord;
+}
+
+/**
+ * A batch's report, `report.md` and `report.json`, lives in a directory named just `<stamp>`
+ * beside the batch's run directories; RUN_ID never matches it, so it is never taken for a run.
+ */
+export const REPORT_MARKDOWN = "report.md";
+export const REPORT_JSON = "report.json";
+
+/** `.harnessbench/runs/<stamp>`, relative to the repository root. */
+export function reportDir(stamp: string): string {
+  return `${RUNS_DIR}/${stamp}`;
+}
+
+/**
+ * Writes a batch's report files under `root`, each to a temporary file renamed into place, so a
+ * reader never sees half a report. Returns the markdown file's path relative to `root`.
+ */
+export function writeReport(root: string, stamp: string, files: { markdown: string; json: string }): string {
+  const dir = join(root, reportDir(stamp));
+  mkdirSync(dir, { recursive: true });
+  for (const [name, text] of [
+    [REPORT_MARKDOWN, files.markdown],
+    [REPORT_JSON, files.json],
+  ] as const) {
+    const tmp = join(dir, `.${name}.tmp`);
+    writeFileSync(tmp, `${text}\n`, "utf8");
+    renameSync(tmp, join(dir, name));
+  }
+  return `${reportDir(stamp)}/${REPORT_MARKDOWN}`;
 }
 
 /** `<stamp>-<fixture>-<environment>`. A `-judge` directory is not a run and never matches. */

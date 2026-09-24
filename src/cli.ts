@@ -13,7 +13,7 @@ import { abortAll, liveWorkspaces } from "./workspace.js";
 const VALUE_FLAGS = new Set(["base", "test", "setup", "agent", "max-turns", "model", "fixture", "stamp", "concurrency", "tag"]);
 /** Value flags that may be given more than once; the values are collected in order. */
 const REPEATABLE_FLAGS = new Set(["tag"]);
-const BOOLEAN_FLAGS = new Set(["dry-run", "json", "keep", "markdown", "judge", "all", "help"]);
+const BOOLEAN_FLAGS = new Set(["dry-run", "json", "keep", "markdown", "detail", "judge", "all", "help"]);
 
 const HELP = `harnessbench - Regression tests for your CLAUDE.md.
 
@@ -27,16 +27,17 @@ run drives a set of fixtures on HEAD's code, every side of every fixture at once
 stamp: with the harness as committed at the merge base with the base branch (previous), and
 with the harness at HEAD (candidate). No ids and no --tag means every fixture in
 .harnessbench/fixtures; ids name fixtures; --tag picks those carrying the tag; both together
-is the intersection. Progress goes to stderr as it happens; the output ends with one
-comparison table per fixture and, for several fixtures, a roll-up above them saying which
-fixtures improved and which regressed on each criterion. Ctrl-C stops every agent, removes
-their workspaces (unless --keep) and exits 130.
+is the intersection. Progress goes to stderr as it happens. At the end the full report is
+written to .harnessbench/runs/<stamp>/report.md and report.json, and stdout gets a summary
+that fits on one screen: three verdict lines (outcome, efficiency, judges), one line per
+fixture with each judge's preference, and the report's path. Ctrl-C stops every agent,
+removes their workspaces (unless --keep) and exits 130.
 
-compare prints the tables again: with no arguments, for the latest batch that has a complete
-pair; --stamp <s> for that batch; --fixture <id> for the latest pair of one fixture; two run
-ids for that pair. judge shows each pair, blind, to every judge in the config's "judges"
-list and prints the tables with one row per judge; run --judge does that for each fixture as
-soon as its two sides are in. judge is incremental: a verdict whose rubric has not changed
+compare prints the report again, rewriting the batch's report files: with no arguments, for
+the latest batch that has a complete pair; --stamp <s> for that batch; --fixture <id> for the
+latest pair of one fixture; two run ids for that pair. judge shows each pair, blind, to every
+judge in the config's "judges" list, rewrites the report and prints it; run --judge does that
+for each fixture as soon as its two sides are in. judge is incremental: a verdict whose rubric has not changed
 since is kept, the rest are judged; --all judges every configured judge again. Over a
 batch, pairs are judged concurrently; a pair with a missing side is listed as skipped.
 
@@ -54,9 +55,11 @@ Options:
   --all             Judge every configured judge, not only those without a fresh verdict (judge only)
   --fixture <id>    Use the latest run pair of this fixture (compare and judge)
   --stamp <s>       Use the batch with this stamp, YYYYMMDD-HHMMSS (compare and judge)
-  --markdown        Print the comparison as GitHub-flavoured markdown (compare only)
+  --detail          Print the full markdown report instead of the summary (run, compare, judge)
+  --markdown        The same as --detail (compare only)
   --dry-run         Report what init would do, without writing anything
-  --json            Print the summary as one JSON document
+  --json            Print the summary as one JSON document; for run, compare and judge, the
+                    report exactly as report.json holds it
   -h, --help        Show this help
 
 Exit codes (run): 0 completed, 2 agent timed out, 3 agent error, 4 agent hit the turn
@@ -185,6 +188,12 @@ async function main(argv: string[]): Promise<number> {
     });
     return 0;
   }
+  const detail = flags["detail"] === true;
+  if (flags["json"] === true && (detail || flags["markdown"] === true)) {
+    throw new CliError(`--json and --${detail ? "detail" : "markdown"} are exclusive; pick one`, 2);
+  }
+  // Only the CLI reads it: tests run under GitHub Actions too, and must not write to it.
+  const stepSummary = process.env["GITHUB_STEP_SUMMARY"];
   if (command === "run") {
     loadCredentials();
     stopRunsOnSignal(flags["keep"] === true);
@@ -199,6 +208,8 @@ async function main(argv: string[]): Promise<number> {
       model: value(flags, "model"),
       keep: flags["keep"] === true,
       json: flags["json"] === true,
+      detail,
+      stepSummary,
       judge: flags["judge"] === true,
     });
     const records = result.fixtures.flatMap((fixture) => fixture.records);
@@ -216,21 +227,18 @@ async function main(argv: string[]): Promise<number> {
     if (given.length > 1) {
       throw new CliError(`${given.join(" and ")} are exclusive; pick one way to say which runs`, 2);
     }
-    if (flags["json"] === true && flags["markdown"] === true) {
-      throw new CliError("--json and --markdown are exclusive; pick one", 2);
-    }
     loadCredentials();
     const pair = ids.length === 2 || fixture !== undefined;
     const addressing = { cwd: process.cwd(), runIds: ids.length === 2 ? (ids as [string, string]) : undefined, fixture };
-    const json = flags["json"] === true;
+    const output = { json: flags["json"] === true, detail, stepSummary };
     if (command === "judge") {
-      if (pair) await judge({ ...addressing, json, all: flags["all"] === true });
-      else await judgeBatch({ cwd: process.cwd(), stamp, json, all: flags["all"] === true });
+      if (pair) await judge({ ...addressing, ...output, all: flags["all"] === true });
+      else await judgeBatch({ cwd: process.cwd(), stamp, ...output, all: flags["all"] === true });
       return 0;
     }
     const markdown = flags["markdown"] === true;
-    if (pair) compare({ ...addressing, json, markdown });
-    else compareBatch({ cwd: process.cwd(), stamp, json, markdown });
+    if (pair) compare({ ...addressing, ...output, markdown });
+    else compareBatch({ cwd: process.cwd(), stamp, ...output, markdown });
     return 0;
   }
   throw new CliError(`unknown command "${command}"\n\n${HELP}`, 2);
