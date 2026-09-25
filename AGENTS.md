@@ -8,8 +8,11 @@ comparing results.
 
 * TypeScript, ESM, Node 20+. `npm run build` compiles to `dist/`; `npm test` runs
   `node --test 'dist/**/*.test.js'`. Do not claim a change works unless both pass.
-* No runtime dependencies except the model layer (`ai` and its providers, plus `zod`) used by
-  judges. Nothing outside `src/judge/` imports them; tests may import `ai/test` for the mock model.
+* No runtime dependencies except two layers, each confined to its directory:
+  * the model layer (`ai` and its providers, plus `zod`) used by judges: nothing outside
+    `src/judge/` imports them; tests may import `ai/test` for the mock model;
+  * the UI layer (`ink`, `react`): nothing outside `src/ui/` imports them, and `.tsx` files live
+    only there (`"jsx": "react-jsx"`); UI tests use `ink-testing-library`.
 
 ## Where things live
 
@@ -30,6 +33,9 @@ Every file has one job. Find the job, then the file; do not search.
 | `agents/` | agent adapters behind `AgentAdapter`; `claude-code-stream.ts` parses the stream |
 | `detect/` | pure detection, `Detection<T> | null`, never writes |
 | `plan.ts` | the only thing that writes to the host repo, as `FileOp[]` applied once |
+| `events.ts` | the `RunEvent`s commands emit, the `EventBus`, the `events.jsonl` recorder |
+| `render/plain.ts` | the plain renderer: stderr progress lines from events |
+| `ui/` | the interactive renderer (Ink): `state.ts` reducer, `Board.tsx`, `Results.tsx`, `App.tsx`, `index.ts` view; `select.ts` picks UI or plain |
 | `errors.ts` | `CliError(message, exitCode)` |
 
 Tests sit beside their module as `x.test.ts`, use `node:test` and `node:assert/strict`, build

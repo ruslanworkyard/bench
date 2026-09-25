@@ -218,6 +218,14 @@ export function harnessSnapshot(
   return { ref, sha, files: sorted, hash: hash.digest("hex") };
 }
 
+/** The paths of either snapshot whose contents differ between their two commits, sorted. */
+export function changedHarnessFiles(root: string, from: HarnessSnapshot, to: HarnessSnapshot): string[] {
+  const paths = [...new Set([...from.files, ...to.files])];
+  if (paths.length === 0) return [];
+  const out = git(["diff", "--name-only", from.sha, to.sha, "--", ...paths], root);
+  return out === null || out === "" ? [] : out.split("\n").sort();
+}
+
 /** Harness files with uncommitted changes. Callers decide whether that matters. */
 export function dirtyHarnessFiles(root: string, harnessPaths: readonly string[]): string[] {
   if (harnessPaths.length === 0) return [];

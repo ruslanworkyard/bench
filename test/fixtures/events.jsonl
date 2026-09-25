@@ -1,0 +1,52 @@
+{"at":99,"type":"batch.start","stamp":"20260925-040217","fixtures":["ttl-cache"],"harness":{"previous":"0995eee15d957f04ac3307949398e430d0b84213","candidate":"92e14b9724c03b566ef5c07db2702a084e411e19"},"sameHarness":false,"agent":{"name":"claude-code","model":"claude-opus-5"},"harnessFilesChanged":1}
+{"at":100,"type":"side.phase","side":{"fixture":"ttl-cache","environment":"previous"},"phase":"queued"}
+{"at":100,"type":"side.phase","side":{"fixture":"ttl-cache","environment":"previous"},"phase":"setup"}
+{"at":100,"type":"side.phase","side":{"fixture":"ttl-cache","environment":"candidate"},"phase":"queued"}
+{"at":100,"type":"side.phase","side":{"fixture":"ttl-cache","environment":"candidate"},"phase":"setup"}
+{"at":233,"type":"side.phase","side":{"fixture":"ttl-cache","environment":"candidate"},"phase":"agent"}
+{"at":250,"type":"side.turn","turn":1,"tokens":{"input":10,"output":20,"cacheRead":100,"cacheWrite":5},"costUsd":null,"side":{"fixture":"ttl-cache","environment":"candidate"}}
+{"at":250,"type":"side.tool","thread":"main","kind":"spawn","label":"spawn Task","failed":false,"side":{"fixture":"ttl-cache","environment":"candidate"}}
+{"at":250,"type":"side.turn","turn":2,"tokens":{"input":11,"output":22,"cacheRead":103,"cacheWrite":9},"costUsd":0.01,"side":{"fixture":"ttl-cache","environment":"candidate"}}
+{"at":250,"type":"side.tool","thread":"toolu_task","kind":"read","label":"read /tmp/harnessbench/run/tree/src/cache.ts","failed":false,"side":{"fixture":"ttl-cache","environment":"candidate"}}
+{"at":250,"type":"side.turn","turn":3,"tokens":{"input":16,"output":28,"cacheRead":110,"cacheWrite":17},"costUsd":0.01,"side":{"fixture":"ttl-cache","environment":"candidate"}}
+{"at":250,"type":"side.tool","thread":"toolu_task","kind":"search","label":"search Grep","failed":false,"side":{"fixture":"ttl-cache","environment":"candidate"}}
+{"at":250,"type":"side.turn","turn":4,"tokens":{"input":21,"output":34,"cacheRead":117,"cacheWrite":25},"costUsd":0.01,"side":{"fixture":"ttl-cache","environment":"candidate"}}
+{"at":250,"type":"side.turn","turn":5,"tokens":{"input":26,"output":40,"cacheRead":124,"cacheWrite":33},"costUsd":0.01,"side":{"fixture":"ttl-cache","environment":"candidate"}}
+{"at":250,"type":"side.tool","thread":"main","kind":"read","label":"read /tmp/harnessbench/run/tree/src/cache.ts","failed":false,"side":{"fixture":"ttl-cache","environment":"candidate"}}
+{"at":251,"type":"side.turn","turn":6,"tokens":{"input":27,"output":42,"cacheRead":424,"cacheWrite":37},"costUsd":0.01,"side":{"fixture":"ttl-cache","environment":"candidate"}}
+{"at":251,"type":"side.tool","thread":"main","kind":"write","label":"write /tmp/harnessbench/run/tree/src/cache.ts","failed":false,"side":{"fixture":"ttl-cache","environment":"candidate"}}
+{"at":251,"type":"side.turn","turn":7,"tokens":{"input":28,"output":44,"cacheRead":724,"cacheWrite":41},"costUsd":0.01,"side":{"fixture":"ttl-cache","environment":"candidate"}}
+{"at":251,"type":"side.tool","thread":"main","kind":"read","label":"read /etc/hosts","failed":false,"side":{"fixture":"ttl-cache","environment":"candidate"}}
+{"at":251,"type":"side.turn","turn":8,"tokens":{"input":29,"output":46,"cacheRead":1024,"cacheWrite":45},"costUsd":0.01,"side":{"fixture":"ttl-cache","environment":"candidate"}}
+{"at":251,"type":"side.tool","thread":"main","kind":"read","label":"read /etc/hosts","failed":true,"side":{"fixture":"ttl-cache","environment":"candidate"}}
+{"at":251,"type":"side.turn","turn":9,"tokens":{"input":30,"output":48,"cacheRead":1324,"cacheWrite":49},"costUsd":0.42,"side":{"fixture":"ttl-cache","environment":"candidate"}}
+{"at":254,"type":"side.phase","side":{"fixture":"ttl-cache","environment":"candidate"},"phase":"tests","detail":"agent completed (9 turns)"}
+{"at":272,"type":"side.phase","side":{"fixture":"ttl-cache","environment":"previous"},"phase":"agent"}
+{"at":283,"type":"side.phase","side":{"fixture":"ttl-cache","environment":"candidate"},"phase":"done","detail":"tests passed (0.0s)"}
+{"at":283,"type":"side.done","side":{"fixture":"ttl-cache","environment":"candidate"},"outcome":"completed","runId":"20260925-040217-ttl-cache-candidate"}
+{"at":288,"type":"side.turn","turn":1,"tokens":{"input":10,"output":20,"cacheRead":100,"cacheWrite":5},"costUsd":null,"side":{"fixture":"ttl-cache","environment":"previous"}}
+{"at":288,"type":"side.tool","thread":"main","kind":"spawn","label":"spawn Task","failed":false,"side":{"fixture":"ttl-cache","environment":"previous"}}
+{"at":288,"type":"side.turn","turn":2,"tokens":{"input":11,"output":22,"cacheRead":103,"cacheWrite":9},"costUsd":0.01,"side":{"fixture":"ttl-cache","environment":"previous"}}
+{"at":288,"type":"side.tool","thread":"toolu_task","kind":"read","label":"read /tmp/harnessbench/run/tree/src/cache.ts","failed":false,"side":{"fixture":"ttl-cache","environment":"previous"}}
+{"at":288,"type":"side.turn","turn":3,"tokens":{"input":16,"output":28,"cacheRead":110,"cacheWrite":17},"costUsd":0.01,"side":{"fixture":"ttl-cache","environment":"previous"}}
+{"at":288,"type":"side.tool","thread":"toolu_task","kind":"search","label":"search Grep","failed":false,"side":{"fixture":"ttl-cache","environment":"previous"}}
+{"at":288,"type":"side.turn","turn":4,"tokens":{"input":21,"output":34,"cacheRead":117,"cacheWrite":25},"costUsd":0.01,"side":{"fixture":"ttl-cache","environment":"previous"}}
+{"at":288,"type":"side.turn","turn":5,"tokens":{"input":26,"output":40,"cacheRead":124,"cacheWrite":33},"costUsd":0.01,"side":{"fixture":"ttl-cache","environment":"previous"}}
+{"at":288,"type":"side.tool","thread":"main","kind":"read","label":"read /tmp/harnessbench/run/tree/src/cache.ts","failed":false,"side":{"fixture":"ttl-cache","environment":"previous"}}
+{"at":288,"type":"side.turn","turn":6,"tokens":{"input":27,"output":42,"cacheRead":424,"cacheWrite":37},"costUsd":0.01,"side":{"fixture":"ttl-cache","environment":"previous"}}
+{"at":288,"type":"side.tool","thread":"main","kind":"write","label":"write /tmp/harnessbench/run/tree/src/cache.ts","failed":false,"side":{"fixture":"ttl-cache","environment":"previous"}}
+{"at":288,"type":"side.turn","turn":7,"tokens":{"input":28,"output":44,"cacheRead":724,"cacheWrite":41},"costUsd":0.01,"side":{"fixture":"ttl-cache","environment":"previous"}}
+{"at":288,"type":"side.tool","thread":"main","kind":"read","label":"read /etc/hosts","failed":false,"side":{"fixture":"ttl-cache","environment":"previous"}}
+{"at":288,"type":"side.turn","turn":8,"tokens":{"input":29,"output":46,"cacheRead":1024,"cacheWrite":45},"costUsd":0.01,"side":{"fixture":"ttl-cache","environment":"previous"}}
+{"at":288,"type":"side.tool","thread":"main","kind":"read","label":"read /etc/hosts","failed":true,"side":{"fixture":"ttl-cache","environment":"previous"}}
+{"at":289,"type":"side.turn","turn":9,"tokens":{"input":30,"output":48,"cacheRead":1324,"cacheWrite":49},"costUsd":0.42,"side":{"fixture":"ttl-cache","environment":"previous"}}
+{"at":289,"type":"side.phase","side":{"fixture":"ttl-cache","environment":"previous"},"phase":"tests","detail":"agent completed (9 turns)"}
+{"at":314,"type":"side.phase","side":{"fixture":"ttl-cache","environment":"previous"},"phase":"done","detail":"tests passed (0.0s)"}
+{"at":314,"type":"side.done","side":{"fixture":"ttl-cache","environment":"previous"},"outcome":"completed","runId":"20260925-040217-ttl-cache-previous"}
+{"at":320,"type":"judge.start","fixture":"ttl-cache","judge":"code-quality"}
+{"at":320,"type":"judge.start","fixture":"ttl-cache","judge":"engineering-practices"}
+{"at":320,"type":"judge.start","fixture":"ttl-cache","judge":"test-quality"}
+{"at":12320,"type":"judge.verdict","fixture":"ttl-cache","judge":"code-quality","preference":"candidate","durationMs":12000,"upstream":null}
+{"at":15320,"type":"judge.verdict","fixture":"ttl-cache","judge":"test-quality","preference":"tie","durationMs":15000,"upstream":"Anthropic"}
+{"at":20320,"type":"judge.failed","fixture":"ttl-cache","judge":"engineering-practices","message":"timed out","durationMs":20000}
+{"at":20400,"type":"batch.done","durationMs":20400,"exitCode":0}

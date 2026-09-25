@@ -42,6 +42,7 @@ import {
   saveReport,
   type BatchComparison,
   type ReportOutput,
+  type ReportView,
 } from "./compare.js";
 
 /**
@@ -115,7 +116,7 @@ export async function judge(options: JudgeOptions, deps: JudgeDeps = defaultDeps
   // A pair of one batch records into that batch's events; a pair across batches has none.
   const stamp = RUN_ID.exec(previous.runId)?.[1];
   const sameBatch = stamp !== undefined && stamp === RUN_ID.exec(candidate.runId)?.[1];
-  const emit = judgeEvents(root, invokedAt, previous.fixture.length, sameBatch ? stamp : null);
+  const emit = judgeEvents(root, invokedAt, previous.fixture.length, sameBatch ? stamp : null, options.view);
   const result = await judgePair(root, config, previous, candidate, deps, options.all, emit);
   const comparison = compare(previous, candidate, loadJudgement(root, config, previous, candidate), config.testLabel);
   const path = rewriteBatchReport(root, config, previous, candidate, options.stepSummary);
@@ -147,7 +148,7 @@ export async function judgeBatch(options: JudgeBatchOptions, deps: JudgeDeps = d
   const invokedAt = Date.now();
   const batch = loadBatch(root, options.stamp);
   const fixtureWidth = Math.max(...batch.pairs.map((pair) => pair.fixture.length));
-  const emit = judgeEvents(root, invokedAt, fixtureWidth, batch.stamp);
+  const emit = judgeEvents(root, invokedAt, fixtureWidth, batch.stamp, options.view);
 
   const settled = await Promise.allSettled(
     batch.pairs.map(async (pair): Promise<JudgePairResult | null> => {
@@ -365,9 +366,15 @@ export async function judgePair(
  * sides', and, when the pairs are one batch's, appended to that batch's `events.jsonl` after a
  * session line.
  */
-function judgeEvents(root: string, invokedAt: number, fixtureWidth: number, stamp: string | null): Emit {
+function judgeEvents(
+  root: string,
+  invokedAt: number,
+  fixtureWidth: number,
+  stamp: string | null,
+  view: ReportView | undefined,
+): Emit {
   const bus = new EventBus();
-  bus.subscribe(plainRenderer({ fixtureWidth }));
+  bus.subscribe(view?.subscriber ?? plainRenderer({ fixtureWidth }));
   if (stamp !== null) {
     const session = { type: "session", command: "judge", startedAt: new Date(invokedAt).toISOString() } as const;
     bus.subscribe(recorder(join(root, reportDir(stamp), EVENTS_FILE), session));

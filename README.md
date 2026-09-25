@@ -290,6 +290,34 @@ Useful flags: `--keep` (leave the workspaces on disk), `--max-turns`, `--model`,
 Exit codes report the agent, not your tests: 0 completed, 2 timeout, 3 error, 4 turn limit,
 1 anything else, 130 interrupted. A failing test suite is a result, not an error.
 
+### The interactive view
+
+At a terminal, `run`, `compare`, `judge` and `replay` open an interactive view instead of
+printing lines:
+
+![harnessbench live board and results](docs/ui.png)
+<!-- screenshot placeholder: the live board of a batch, then its results -->
+
+While runs are in flight, a live board: one row per fixture, one card per side with its phase
+(`○` queued, `◐` setup, `●` agent, `◆` tests, `✓` done, `✗` failed), turns, cost and a sparkline
+of output tokens per turn; judge chips fill in as verdicts arrive. `↑↓` selects a side, `⏎`
+follows its tool calls in a lower pane (`esc` closes it), `q` asks, then stops every run as
+Ctrl-C does. When the batch is done, the results: the verdict lines with `▲` improved and `▼`
+regressed, one row per fixture with its headline deltas and judge chips (`⬤` candidate, `○`
+previous, `·` tie), and the selected fixture's judge reasons, or with `⇥` its full comparison
+table. `r` opens `report.md` in `$EDITOR` (or prints its path), `q` quits and leaves the plain
+summary in your scrollback. Colour is only ever a second signal: every mark has a glyph, and
+`NO_COLOR` is honoured. The view needs 80 columns and uses more when there are more.
+
+The plain output described above is what you get whenever stdout or stdin is not a terminal,
+`CI` is set, or you pass `--json`, `--plain`, `--detail` or `--markdown`.
+
+To see the UI without running agents, replay a recorded batch:
+
+```sh
+harnessbench replay --speed 5
+```
+
 ### Reading the results again
 
 ```sh
@@ -357,6 +385,8 @@ Fixture design is where real examples help most.
 
 ## Changelog
 
+- Unreleased: an interactive terminal view (live board, then results) for `run`, `compare`,
+  `judge` and `replay` at a terminal; `--plain` keeps the text output.
 - Unreleased: `replay [<stamp>] [--speed <n>] [--plain]`, and every batch records its events to
   `events.jsonl`.
 - Unreleased: `run`, `compare` and `judge` print a one-screen summary and write the full report

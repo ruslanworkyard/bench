@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { compare as compareRecords, rollup, type Comparison, type JudgeInput, type Rollup } from "../compare.js";
 import { RUNS_DIR, type Config } from "../config.js";
 import { CliError } from "../errors.js";
+import type { Subscriber } from "../events.js";
 import { requireJudge } from "../judges.js";
 import { requireConfig, requireGit, requireRepo } from "../preflight.js";
 import { formatReportJson, formatReportMarkdown, formatSummaryReport } from "../print.js";
@@ -28,7 +29,19 @@ import type { JudgeRecord } from "./judge.js";
  * the full markdown with `detail`, the report document with `json`. `stepSummary` is
  * `$GITHUB_STEP_SUMMARY`, handed in by the CLI: the markdown is appended to it once written.
  */
-export type ReportOutput = { json: boolean; detail?: boolean | undefined; stepSummary?: string | undefined };
+export type ReportOutput = {
+  json: boolean;
+  detail?: boolean | undefined;
+  stepSummary?: string | undefined;
+  /** The interactive view, when the CLI chose it: it hears the events and shows the report instead of stdout. */
+  view?: ReportView | undefined;
+};
+
+/**
+ * A renderer a command hands its events and its final report to, in place of the plain
+ * progress lines and the stdout summary. The CLI builds it (`src/ui/`); commands only call it.
+ */
+export type ReportView = { subscriber: Subscriber; show(report: BatchReport, path: string | null): void };
 
 export type CompareOptions = ReportOutput & {
   cwd: string;
@@ -130,9 +143,10 @@ export function saveReport(root: string, report: BatchReport, stepSummary: strin
   return path;
 }
 
-/** The report on stdout, and nothing else there: summary, markdown or JSON. */
+/** The report on stdout, and nothing else there: summary, markdown or JSON; or handed to the view. */
 export function printReport(report: BatchReport, output: ReportOutput, path: string | null): void {
-  if (output.json) console.log(formatReportJson(report));
+  if (output.view !== undefined) output.view.show(report, path);
+  else if (output.json) console.log(formatReportJson(report));
   else if (output.detail === true) console.log(formatReportMarkdown(report));
   else console.log(formatSummaryReport(report, path));
 }

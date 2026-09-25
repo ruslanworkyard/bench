@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { AgentAdapter, AgentResult } from "../agents/types.js";
 import { compare, rollup, type Comparison, type JudgeInput, type Rollup } from "../compare.js";
 import { FIXTURES_DIR, RUNS_DIR, type AgentConfig } from "../config.js";
-import { dirtyHarnessFiles, harnessFiles, type HarnessSnapshot } from "../detect/harness.js";
+import { changedHarnessFiles, dirtyHarnessFiles, harnessFiles, type HarnessSnapshot } from "../detect/harness.js";
 import { CliError } from "../errors.js";
 import { EventBus, emitter, recorder, type Emit, type SideRef } from "../events.js";
 import { selectFixtures } from "../fixtures.js";
@@ -146,7 +146,7 @@ export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): P
   // One timestamp for the whole batch, so every run id differs only in fixture and environment.
   const stamp = runStamp(new Date());
   const bus = new EventBus();
-  bus.subscribe(plainRenderer());
+  bus.subscribe(options.view?.subscriber ?? plainRenderer());
   bus.subscribe(recorder(join(root, reportDir(stamp), EVENTS_FILE)));
   const emit = emitter(bus, invokedAt);
   emit({
@@ -155,6 +155,7 @@ export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): P
     fixtures: fixtures.map((each) => each.fixture.id),
     harness: { previous: previous.sha, candidate: head.sha },
     sameHarness: head.hash === previous.hash,
+    harnessFilesChanged: changedHarnessFiles(root, previous, head).length,
     agent: { name: adapter.name, model: agentConfig.model },
   });
   const shared = {

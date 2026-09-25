@@ -17,8 +17,6 @@ export type ReplayOptions = ReportOutput & {
   stamp?: string | undefined;
   /** Original spacing divided by this; 0 replays at once. */
   speed: number;
-  /** The plain renderer; for now the only one. */
-  plain: boolean;
 };
 
 export type ReplayResult = { stamp: string; events: number; report: BatchReport };
@@ -50,7 +48,7 @@ export async function replay(options: ReplayOptions): Promise<ReplayResult> {
     .flatMap((line, i) => (line.trim() === "" ? [] : [parseLine(line, i + 1, stamp)]));
 
   const bus = new EventBus();
-  bus.subscribe(plainRenderer());
+  bus.subscribe(options.view?.subscriber ?? plainRenderer());
   let previousAt = 0;
   let events = 0;
   for (const line of lines) {

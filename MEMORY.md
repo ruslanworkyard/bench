@@ -49,10 +49,12 @@ Goal: an open-source npm package (`npx harnessbench`) people adopt. Quality over
   already set, so CI is untouched. Nothing prints its values; a malformed line is reported by
   number.
 - **Single npm package**, TypeScript, ESM, Node >= 20.12 (`util.parseEnv`). No runtime
-  dependencies except the model layer used by judges: `ai` with `@ai-sdk/anthropic`,
-  `@ai-sdk/openai`, `@ai-sdk/google`, `@ai-sdk/openai-compatible`, and `zod`, all pinned to
-  exact versions. Nothing outside `src/judge/` imports them (tests may import `ai/test` for the
-  mock model). Hand-written argv parsing until it hurts.
+  dependencies except two layers, all pinned to exact versions: the model layer used by judges
+  (`ai` with `@ai-sdk/anthropic`, `@ai-sdk/openai`, `@ai-sdk/google`,
+  `@ai-sdk/openai-compatible`, and `zod`), which nothing outside `src/judge/` imports (tests may
+  import `ai/test` for the mock model); and the UI layer (`ink` 6, `react` 19), which nothing
+  outside `src/ui/` imports (`select.test.ts` checks it), `.tsx` only there. Ink 6, not 7: 7
+  needs Node 22. Hand-written argv parsing until it hurts.
 - **Judges are a catalogue like fixtures**: `judges/<id>/judge.json` + `prompt.md` ship with the
   package, `init` copies them into `.harnessbench/judges/`, the repo edits or adds its own. A
   judge is a rubric plus a declaration of what it may look at (`context`, from a fixed menu).
@@ -153,7 +155,24 @@ Goal: an open-source npm package (`npx harnessbench`) people adopt. Quality over
   nothing, so records nothing. `replay [<stamp>] [--speed <n>]` re-emits the file on a bus
   (spacing / speed, default 10, 0 instant; a session line restarts the clock), then prints the
   batch's `report.json` as `run` did. A batch without the file predates recording and is refused
-  naming `compare --stamp`. The UI (next) is one more subscriber; `--plain` picks today's.
+  naming `compare --stamp`. The UI is one more subscriber (below); `--plain` picks the plain one.
+- **The interactive UI (2026-09-25).** `src/ui/`, Ink. A second renderer, chosen by the CLI
+  (`ui/select.ts`): the UI only when stdout and stdin are TTYs and none of `--json`, `--plain`,
+  `--detail`/`--markdown`, `CI` (set, non-empty) is given; otherwise the plain renderer and stdout
+  exactly as before. The CLI loads `ui/index.ts` only when chosen and hands the command a
+  `ReportView` (`commands/compare.ts`: `subscriber` for events, `show(report, path)` in place of
+  `printReport`'s stdout); commands never import the UI. The view mounts on its first event or
+  report, so a failing preflight draws nothing; `closed()` waits for `q` only once a report was
+  shown. State is a pure reducer (`ui/state.ts`, `reduce(state, event)`); the results read the
+  `BatchReport` and `print.ts`'s `verdictLines` / `reportHeader` / `formatSummaryReport`, never
+  recompute. Colour is semantic only and every signal has a glyph; `NO_COLOR` drops the colour
+  (our own context, not chalk's detection). Below 100 columns cards stack and sparklines drop; at
+  160+ a card shows its latest tool call. `q` on the board asks, then takes the CLI's `interrupt`
+  (the SIGINT path: `abortAll`, exit 130); Ctrl-C in raw mode goes there without asking. `q` on
+  the results leaves `formatSummaryReport` in scrollback via `Static`. `batch.start` gained
+  `harnessFilesChanged` (`detect/harness.ts` `changedHarnessFiles`, git diff over both
+  snapshots' paths), optional for older recordings. Not built: a gate line (there is no gating
+  yet; add it with the gating task), background mode, mouse, themes.
 - **stdout rules for `run`, `compare`, `judge`:** stdout carries the report and nothing else —
   the one-screen summary by default (header, warnings, three verdict lines Outcome / Efficiency
   / Judges, one line per fixture with each judge's preference, the report path), the markdown
@@ -275,6 +294,9 @@ worktree (`$TMPDIR/harnessbench/<run>/tree`) with an isolated `HOME` for the age
 - **Events and replay (2026-09-25).** See the settled decisions above: the event bus, the plain
   renderer, `events.jsonl`, `replay`.
 
+- **Interactive UI (2026-09-25).** The live board and the results in Ink, for `run`, `compare`,
+  `judge` and `replay` at a terminal; `replay --speed 5` is the demo. See the settled decisions.
+
 ## Deliberately not built
 
 Named so they are not re-proposed as ideas: baseline reuse (skipping a `previous` run whose
@@ -284,8 +306,9 @@ classification in telemetry, credential encryption or `.env.ci` variants.
 
 ## Next
 
-- A rich terminal UI (Ink) as a second subscriber, fed by the event stream and the final
-  `BatchReport`; `replay` demonstrates it without running agents.
+- Try the UI on a real batch at 80 and 160+ columns, and replay it at `--speed 1` beside the
+  live run; fix what the fake recording did not show (long tool labels are absolute workspace
+  paths today).
 0. A real batch (`npx . run --judge --keep`) on this repo, three fixtures; read the roll-up and
    check the wall clock and the progress lines are legible with six sides interleaved.
 1. Test `init --dry-run` on a real repo with a real `CLAUDE.md`; check the harness list,

@@ -22,6 +22,8 @@ export type RunEventBody =
       fixtures: string[];
       harness: { previous: string; candidate: string };
       sameHarness: boolean;
+      /** Harness files whose contents differ between the two sides; absent in older recordings. */
+      harnessFilesChanged?: number;
       agent: { name: string; model: string | null };
     }
   /**

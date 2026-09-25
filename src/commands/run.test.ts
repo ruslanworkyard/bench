@@ -16,6 +16,7 @@ import { basename, delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 
+import { claudeCode } from "../agents/claude-code.js";
 import { compare } from "../compare.js";
 import { requireConfig } from "../preflight.js";
 import { buildReport, type BatchReport } from "../report.js";
@@ -75,17 +76,13 @@ const ENV: NodeJS.ProcessEnv = {
 // The suite may itself run under GitHub Actions; only the test that means to may append to a step summary.
 delete ENV["GITHUB_STEP_SUMMARY"];
 
-/** The same environment with nothing that could authenticate an agent. */
+/**
+ * The same environment with nothing that could authenticate an agent: every variable the
+ * adapter accepts, read from the adapter so a new one (CLAUDE_CODE_OAUTH_TOKEN) is never missed.
+ */
 function withoutCredentials(): NodeJS.ProcessEnv {
   const env = { ...ENV };
-  for (const name of [
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    "CLAUDE_CODE_USE_BEDROCK",
-    "CLAUDE_CODE_USE_VERTEX",
-  ]) {
-    delete env[name];
-  }
+  for (const name of claudeCode.credentialEnv) delete env[name];
   return env;
 }
 
@@ -337,6 +334,7 @@ test("a batch records its events to events.jsonl, and stderr says exactly what i
     fixtures: ["ttl-cache"],
     harness: { previous: sha, candidate: sha },
     sameHarness: true,
+    harnessFilesChanged: 0,
     agent: { name: AGENT, model: null },
   });
   assert.deepEqual({ ...events.at(-1), at: 0, durationMs: 0 }, { at: 0, type: "batch.done", durationMs: 0, exitCode: 0 });

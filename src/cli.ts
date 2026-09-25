@@ -9,6 +9,8 @@ import { RUN_EXIT_CODES, run } from "./commands/run.js";
 import { loadEnvFile } from "./env.js";
 import { CliError } from "./errors.js";
 import { requireGit, requireRepo } from "./preflight.js";
+import type { View } from "./ui/index.js";
+import { selectRenderer } from "./ui/select.js";
 import { abortAll, liveWorkspaces } from "./workspace.js";
 
 const VALUE_FLAGS = new Set(["base", "test", "setup", "agent", "max-turns", "model", "fixture", "stamp", "concurrency", "tag", "test-files", "speed"]);
@@ -43,6 +45,12 @@ for each fixture as soon as its two sides are in. judge is incremental: a verdic
 since is kept, the rest are judged; --all judges every configured judge again. Over a
 batch, pairs are judged concurrently; a pair with a missing side is listed as skipped.
 
+At a terminal, run, compare, judge and replay open an interactive view: a live board of every
+side while runs are in flight, then the results (arrows ▲ improved, ▼ regressed; judge chips ⬤
+candidate, ○ previous, · tie), which leave the plain summary in the terminal on q. Anything else
+(stdout or stdin not a terminal, --json, --plain, --detail, --markdown, CI set) prints plain
+text as described above.
+
 Every run records its events (and judge appends its own) to .harnessbench/runs/<stamp>/events.jsonl.
 replay plays them back, the latest batch or the one named, with their original spacing divided
 by --speed, then prints the batch's report as run did.
@@ -65,7 +73,8 @@ Options:
   --fixture <id>    Use the latest run pair of this fixture (compare and judge)
   --stamp <s>       Use the batch with this stamp, YYYYMMDD-HHMMSS (compare and judge)
   --speed <n>       Replay this many times faster; 0 is instant; default 10 (replay only)
-  --plain           Replay as plain progress lines, the only renderer for now (replay only)
+  --plain           Plain progress lines and the text summary instead of the interactive view
+                    (run, compare, judge, replay)
   --detail          Print the full markdown report instead of the summary (run, compare, judge, replay)
   --markdown        The same as --detail (compare only)
   --dry-run         Report what init would do, without writing anything
@@ -173,18 +182,50 @@ const INTERRUPTED_EXIT_CODE = 130;
  * Written with writeSync: on macOS a piped stderr is asynchronous and process.exit would
  * cut the message off.
  */
+function interrupt(keep: boolean): void {
+  writeSync(process.stderr.fd, `harnessbench: interrupted, stopping ${liveWorkspaces()} run(s)\n`);
+  const paths = abortAll({ keep });
+  if (keep) for (const path of paths) writeSync(process.stderr.fd, `workspace kept at ${path}\n`);
+  process.exit(INTERRUPTED_EXIT_CODE);
+}
+
 function stopRunsOnSignal(keep: boolean): void {
   let stopping = false;
   const onSignal = (): void => {
     if (stopping) return;
     stopping = true;
-    writeSync(process.stderr.fd, `harnessbench: interrupted, stopping ${liveWorkspaces()} run(s)\n`);
-    const paths = abortAll({ keep });
-    if (keep) for (const path of paths) writeSync(process.stderr.fd, `workspace kept at ${path}\n`);
-    process.exit(INTERRUPTED_EXIT_CODE);
+    interrupt(keep);
   };
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
+}
+
+/**
+ * The interactive view when a person is at a terminal and nothing asked for text, otherwise
+ * none (the plain renderer). The UI layer is loaded only when chosen. Its `q` on the board
+ * takes the same path as Ctrl-C.
+ */
+async function chooseView(flags: Flags, keep: boolean, speed?: number): Promise<View | undefined> {
+  const renderer = selectRenderer({
+    stdoutTTY: process.stdout.isTTY === true,
+    stdinTTY: process.stdin.isTTY === true,
+    json: flags["json"] === true,
+    plain: flags["plain"] === true,
+    detail: flags["detail"] === true || flags["markdown"] === true,
+    env: process.env,
+  });
+  if (renderer === "plain") return undefined;
+  const { createView } = await import("./ui/index.js");
+  return createView({ onAbort: () => interrupt(keep), speed });
+}
+
+/** The command's result once the view, if any, has been closed; a failure closes it at once. */
+async function shownIn<T>(view: View | undefined, work: Promise<T> | (() => Promise<T>)): Promise<T> {
+  try {
+    return await (typeof work === "function" ? work() : work);
+  } finally {
+    await view?.closed();
+  }
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -216,7 +257,8 @@ async function main(argv: string[]): Promise<number> {
   if (command === "run") {
     loadCredentials();
     stopRunsOnSignal(flags["keep"] === true);
-    const result = await run({
+    const view = await chooseView(flags, flags["keep"] === true);
+    const result = await shownIn(view, run({
       cwd: process.cwd(),
       fixtureIds: positional.slice(1),
       tags: values(flags, "tag"),
@@ -230,7 +272,8 @@ async function main(argv: string[]): Promise<number> {
       detail,
       stepSummary,
       judge: flags["judge"] === true,
-    });
+      view,
+    }));
     const records = result.fixtures.flatMap((fixture) => fixture.records);
     return Math.max(0, ...records.map((record) => RUN_EXIT_CODES[record.outcome]));
   }
@@ -249,28 +292,27 @@ async function main(argv: string[]): Promise<number> {
     loadCredentials();
     const pair = ids.length === 2 || fixture !== undefined;
     const addressing = { cwd: process.cwd(), runIds: ids.length === 2 ? (ids as [string, string]) : undefined, fixture };
-    const output = { json: flags["json"] === true, detail, stepSummary };
+    const view = await chooseView(flags, false);
+    const output = { json: flags["json"] === true, detail, stepSummary, view };
     if (command === "judge") {
-      if (pair) await judge({ ...addressing, ...output, all: flags["all"] === true });
-      else await judgeBatch({ cwd: process.cwd(), stamp, ...output, all: flags["all"] === true });
+      if (pair) await shownIn(view, judge({ ...addressing, ...output, all: flags["all"] === true }));
+      else await shownIn(view, judgeBatch({ cwd: process.cwd(), stamp, ...output, all: flags["all"] === true }));
       return 0;
     }
     const markdown = flags["markdown"] === true;
-    if (pair) compare({ ...addressing, ...output, markdown });
-    else compareBatch({ cwd: process.cwd(), stamp, ...output, markdown });
+    if (pair) await shownIn(view, async () => compare({ ...addressing, ...output, markdown }));
+    else await shownIn(view, async () => compareBatch({ cwd: process.cwd(), stamp, ...output, markdown }));
     return 0;
   }
   if (command === "replay") {
     const stamps = positional.slice(1);
     if (stamps.length > 1) throw new CliError(`replay takes one stamp or none\n\n${HELP}`, 2);
-    await replay({
-      cwd: process.cwd(),
-      stamp: stamps[0],
-      speed: nonNegativeNumber(flags, "speed") ?? 10,
-      plain: flags["plain"] === true,
-      json: flags["json"] === true,
-      detail,
-    });
+    const speed = nonNegativeNumber(flags, "speed") ?? 10;
+    const view = await chooseView(flags, false, speed);
+    await shownIn(
+      view,
+      replay({ cwd: process.cwd(), stamp: stamps[0], speed, json: flags["json"] === true, detail, view }),
+    );
     return 0;
   }
   throw new CliError(`unknown command "${command}"\n\n${HELP}`, 2);

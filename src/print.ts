@@ -196,7 +196,7 @@ function ended(result: Pick<CommandResult, "exitCode" | "timedOut">): string {
 }
 
 /** `05:01`: minutes and seconds, the minutes never wrapping into hours. */
-function clock(ms: number): string {
+export function clock(ms: number): string {
   const total = Math.floor(ms / 1000);
   return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
 }
@@ -356,7 +356,7 @@ const OUTCOME_ROWS = new Set(["outcome", "tests"]);
 const SEVERITY: Classification[] = ["regressed", "improved", "unchanged", "n/a"];
 
 /** `harnessbench  2 fixtures · code 9c4c5e2 · previous cca3e7c → candidate 9c4c5e2 · claude-sonnet-5`. */
-function reportHeader(report: BatchReport): string {
+export function reportHeader(report: BatchReport): string {
   return (
     `harnessbench  ${plural(report.fixtures.length, "fixture")} · code ${short(report.headSha)} · ` +
     `previous ${short(report.harness.previous)} → candidate ${short(report.harness.candidate)} · ` +
@@ -405,7 +405,8 @@ function judgesVerdict(rollup: Rollup): string {
   return unjudged === 0 ? counts : `${counts} · not judged ${unjudged}`;
 }
 
-function verdictLines(report: BatchReport): Array<[string, string]> {
+/** The three verdict lines, label and text: Outcome, Efficiency, Judges. */
+export function verdictLines(report: BatchReport): Array<[string, string]> {
   return [
     ["Outcome", outcomeVerdict(report)],
     ["Efficiency", efficiencyVerdict(report.rollup)],

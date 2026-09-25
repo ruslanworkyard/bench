@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 
 import {
+  changedHarnessFiles,
   dirtyHarnessFiles,
   harnessFiles,
   harnessFilesAt,
@@ -261,6 +262,23 @@ test("harnessSnapshot takes extra paths that exist at the ref, and skips the res
   assert.deepEqual(extended.files, ["CLAUDE.md", "docs/adr/001.md", "docs/adr/002.md", "tools/lint.sh"]);
   assert.notEqual(extended.hash, bare.hash);
   assert.equal(harnessSnapshot(root, "no-such-ref", []), null);
+});
+
+test("changedHarnessFiles lists harness files added, edited or removed between two snapshots, not the code", () => {
+  const root = tree({ "CLAUDE.md": "# Rules\n", "AGENTS.md": "agents\n", ".claude/settings.json": "{}\n", "src.txt": "code\n" });
+  git(root, "init", "--quiet", "-b", "main");
+  commit(root, "initial");
+  const before = snapshot(root, "HEAD");
+
+  write(root, "CLAUDE.md", "# Rules, revised\n");
+  write(root, "src.txt", "more code\n");
+  write(root, ".mcp.json", "{}\n");
+  rmSync(join(root, "AGENTS.md"));
+  commit(root, "harness change");
+  const after = snapshot(root, "HEAD");
+
+  assert.deepEqual(changedHarnessFiles(root, before, after), [".mcp.json", "AGENTS.md", "CLAUDE.md"]);
+  assert.deepEqual(changedHarnessFiles(root, after, after), []);
 });
 
 test("the git source ignores .harnessbench, node_modules and symlinks, like the working tree", () => {
