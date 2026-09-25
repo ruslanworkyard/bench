@@ -17,7 +17,7 @@
   },
   "judge": {
     "provider": "openai-compatible",
-    "model": "z-ai/glm-5.3-flash",
+    "model": "deepseek/deepseek-v4.1-flash",
     "apiKeyEnv": "OPENROUTER_API_KEY",
     "baseUrl": "https://openrouter.ai/api/v1",
     "maxContextKb": 512
