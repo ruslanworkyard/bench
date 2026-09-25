@@ -79,6 +79,18 @@ Goal: an open-source npm package (`npx harnessbench`) people adopt. Quality over
   row keeps id `tests`; its label is `testLabel` (default "Agent's tests"; "Lint", "Build" for a
   project whose verification is not a test runner). Old records read: a bare command result maps
   by exit code, `null` to `not run`.
+- **`init` writes fast mode only when it is exact.** A wrong per-file command silently runs
+  nothing or the wrong thing, so detection is exact or not at all. `detect/test-files.ts` gives
+  `testFiles` as the union of each present ecosystem's globs (package.json, Python manifests or
+  `conftest.py`/`pytest.ini`, composer.json (+ Pest), Gemfile with rspec, go.mod). The per-file
+  command (`detect/test-command.ts`) is written only for a runner called bare: Jest, Vitest,
+  `node --test` on source paths, pytest, Pest, PHPUnit (no Pest), RSpec, `go test {dirs}`. The
+  full-suite command, with a `hint` on the detection naming why and what to write instead, when:
+  a build precedes the tests (`scripts.test` or `scripts.pretest`) or they run from
+  `dist/`/`build/`/`out/`; a monorepo; Gradle/Maven/.NET/Cargo/Swift; the runner has options in
+  `scripts.test` we would drop; several runners; test files of several ecosystems (one runner
+  cannot take them all); or no mappable runner (hint: the nearest example). This repo falls back
+  (pretest builds to `dist/`); its config is written by hand.
 - **Bin name == package name** so `npx harnessbench` works.
 - **A batch is a stamp.** One `run` invocation runs a set of fixtures under one
   `YYYYMMDD-HHMMSS` stamp; nothing else on disk names the batch. A pair is
@@ -209,6 +221,10 @@ worktree (`$TMPDIR/harnessbench/<run>/tree`) with an isolated `HOME` for the age
   configurable `testLabel`. This repo runs `npm run build && node --test` on the changed tests'
   `dist/` twins.
 
+- **Fast-mode detection in `init` (2026-09-25).** `testFiles` and the per-file `testCommand`
+  from detection, `--test-files <glob>` (repeatable) to override, a `Test files` summary line,
+  and the fallback hint under the test command.
+
 ## Deliberately not built
 
 Named so they are not re-proposed as ideas: baseline reuse (skipping a `previous` run whose
@@ -220,9 +236,8 @@ classification in telemetry, credential encryption or `.env.ci` variants.
 
 0. A real batch (`npx . run --judge --keep`) on this repo, three fixtures; read the roll-up and
    check the wall clock and the progress lines are legible with six sides interleaved.
-1. `init` detects `testFiles` and the placeholder form of the test command (next task).
-   Test `init --dry-run` on a real repo with a real `CLAUDE.md`; check the harness list,
-   test command and base branch are right. Fix what's wrong.
+1. Test `init --dry-run` on a real repo with a real `CLAUDE.md`; check the harness list,
+   test command (and its fast mode or hint), test files and base branch are right. Fix what's wrong.
 2. Real-agent smoke of `run`; fix what the real stream shows that the recording did not. Then
    `judge` on that pair with a real model: read `prompt.txt` and the verdicts by hand; revise
    the three draft rubrics from what the model actually did with them.

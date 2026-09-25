@@ -10,9 +10,9 @@ import { CliError } from "./errors.js";
 import { requireGit, requireRepo } from "./preflight.js";
 import { abortAll, liveWorkspaces } from "./workspace.js";
 
-const VALUE_FLAGS = new Set(["base", "test", "setup", "agent", "max-turns", "model", "fixture", "stamp", "concurrency", "tag"]);
+const VALUE_FLAGS = new Set(["base", "test", "setup", "agent", "max-turns", "model", "fixture", "stamp", "concurrency", "tag", "test-files"]);
 /** Value flags that may be given more than once; the values are collected in order. */
-const REPEATABLE_FLAGS = new Set(["tag"]);
+const REPEATABLE_FLAGS = new Set(["tag", "test-files"]);
 const BOOLEAN_FLAGS = new Set(["dry-run", "json", "keep", "markdown", "detail", "judge", "all", "help"]);
 
 const HELP = `harnessbench - Regression tests for your CLAUDE.md.
@@ -44,6 +44,9 @@ batch, pairs are judged concurrently; a pair with a missing side is listed as sk
 Options:
   --base <branch>   Base branch to compare against (overrides config/detection)
   --test <command>  Test command (init only; overrides detection)
+  --test-files <glob>
+                    Which changed files are tests, e.g. 'src/**/*.test.ts'; repeatable
+                    (init only; overrides detection)
   --setup <command> Setup command run before the agent, e.g. npm ci (init only; overrides detection)
   --agent <name>    Agent to drive, by adapter name (overrides config/detection)
   --tag <tag>       Run the fixtures carrying this tag; repeatable, any tag matches (run only)
@@ -181,6 +184,7 @@ async function main(argv: string[]): Promise<number> {
       cwd: process.cwd(),
       base: value(flags, "base"),
       test: value(flags, "test"),
+      testFiles: values(flags, "test-files"),
       setup: value(flags, "setup"),
       agent: value(flags, "agent"),
       dryRun: flags["dry-run"] === true,

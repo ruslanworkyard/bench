@@ -38,8 +38,8 @@ Requires Node.js 20.12+ and a git repository.
 npx harnessbench init
 ```
 
-`init` detects your harness files, test command, setup command, base branch and installed
-agents; writes `.harnessbench/config.json`; copies the starter fixtures and judges into
+`init` detects your harness files, test command and test files, setup command, base branch and
+installed agents; writes `.harnessbench/config.json`; copies the starter fixtures and judges into
 `.harnessbench/`; gitignores `.harnessbench/runs/` and `.harnessbench/.env`; and writes a
 commented `.harnessbench/.env.example`. It is idempotent. Use `--dry-run` to see what it would
 do first.
@@ -102,6 +102,31 @@ pass" is. It also keeps a side to seconds instead of a 15-minute suite.
   whole suite, as before.
 - `testLabel` names the row (default `Agent's tests`); use `Lint` or `Build` when your check is
   not a test runner.
+
+`init` writes both for you where the mapping from file paths to the runner is exact, and
+otherwise writes your full-suite command and says why (`fast mode not detected: ...`) with an
+example to adapt. `--test` and `--test-files <glob>` (repeatable) override what it detects.
+
+| runner | detected from | `testCommand` |
+|---|---|---|
+| Jest | `jest` in devDependencies, or `scripts.test` is `jest` | `npx jest {files}` |
+| Vitest | `vitest` in devDependencies, or `scripts.test` is `vitest` | `npx vitest run {files}` |
+| `node --test` | `scripts.test` is `node --test` on source paths | `node --test {files}` |
+| pytest | `pytest` in pyproject.toml or requirements, `conftest.py`, `pytest.ini` | `pytest {files}` |
+| Pest | `pestphp/pest` in composer require-dev | `vendor/bin/pest {files}` |
+| PHPUnit | `phpunit/phpunit` in require-dev, no Pest | `vendor/bin/phpunit {files}` |
+| RSpec | `rspec` in the Gemfile | `bundle exec rspec {files}` |
+| Go | `go.mod` | `go test {dirs}` |
+
+You get the full suite and a hint instead when the tests need a build first or run from
+`dist/`, `build/` or `out/`; in a monorepo (workspaces, `pnpm-workspace.yaml`, `turbo.json`,
+`nx.json`, `go.work`); for Gradle, Maven, .NET, Cargo and Swift; when `scripts.test` passes
+options to the runner (`jest --coverage`) that a bare command would drop; with more than one
+runner or test files of more than one language. Write fast mode by hand for those: keep the
+options and put `{files}` where the paths go (`npx jest --coverage {files}`); map sources to
+build output with a shell pipeline (the TypeScript example below); in a monorepo, use one root
+runner if one config covers every package; for anything else, narrow with `{dirs}`, or dispatch
+on `HB_TEST_FILES` in a script of your own, or keep the full suite.
 
 ```jsonc
 // pytest

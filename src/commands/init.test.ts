@@ -210,6 +210,60 @@ test("a lockfile gives the config its setup command; --setup overrides it", () =
   assert.equal(config2.setupCommand, "make deps");
 });
 
+test("detected test files and a per-file test command land in a new config, and the summary says so", () => {
+  const root = repo();
+  writeFileSync(join(root, "package.json"), '{"scripts":{"test":"jest"},"devDependencies":{"jest":"^29"}}\n', "utf8");
+
+  const report = runJson(root);
+
+  assert.deepEqual(report.testCommand, { value: "npx jest {files}", source: "package.json scripts.test" });
+  assert.deepEqual(report.testFiles, { value: ["**/*.test.*", "**/*.spec.*", "**/__tests__/**"], source: "package.json" });
+  const config = JSON.parse(readFileSync(join(root, CONFIG_FILE), "utf8")) as Config;
+  assert.equal(config.testCommand, "npx jest {files}");
+  assert.deepEqual(config.testFiles, ["**/*.test.*", "**/*.spec.*", "**/__tests__/**"]);
+
+  const output = run(root, "--dry-run");
+  assert.match(output, /Test command\s+npx jest \{files\}\s+package\.json scripts\.test/);
+  assert.match(output, /Test files\s+\*\*\/\*\.test\.\* \*\*\/\*\.spec\.\* \*\*\/__tests__\/\*\*\s+package\.json/);
+  assert.doesNotMatch(output, /fast mode not detected/);
+});
+
+test("the summary prints the hint when fast mode was not detected", () => {
+  const root = repo();
+  writeFileSync(join(root, "package.json"), '{"scripts":{"pretest":"npm run build","test":"node --test dist/"}}\n', "utf8");
+
+  const output = run(root);
+
+  assert.match(output, /Test command\s+npm test\s+package\.json scripts\.test\n\s+fast mode not detected: scripts\.pretest builds before the tests/);
+  const config = JSON.parse(readFileSync(join(root, CONFIG_FILE), "utf8")) as Config;
+  assert.equal(config.testCommand, "npm test");
+});
+
+test("--test-files overrides the detected globs, and repeats", () => {
+  const root = repo();
+  writeFileSync(join(root, "package.json"), '{"scripts":{"test":"jest"}}\n', "utf8");
+
+  const report = runJson(root, "--test-files", "src/**/*.test.ts", "--test-files", "e2e/*.spec.ts");
+
+  assert.deepEqual(report.testFiles, { value: ["src/**/*.test.ts", "e2e/*.spec.ts"], source: "--test-files flag" });
+  const config = JSON.parse(readFileSync(join(root, CONFIG_FILE), "utf8")) as Config;
+  assert.deepEqual(config.testFiles, ["src/**/*.test.ts", "e2e/*.spec.ts"]);
+});
+
+test("an existing config keeps its test command and test files", () => {
+  const root = repo();
+  run(root, "--test", "make check", "--test-files", "t/*.t");
+  writeFileSync(join(root, "package.json"), '{"scripts":{"test":"jest"}}\n', "utf8");
+  const before = readFileSync(join(root, CONFIG_FILE), "utf8");
+
+  run(root);
+
+  assert.equal(readFileSync(join(root, CONFIG_FILE), "utf8"), before);
+  const config = JSON.parse(before) as Config;
+  assert.equal(config.testCommand, "make check");
+  assert.deepEqual(config.testFiles, ["t/*.t"]);
+});
+
 test("init on a repository whose config predates setupCommand still loads it", () => {
   const root = repo();
   writeFileSync(join(root, ".harnessbench"), "", "utf8");

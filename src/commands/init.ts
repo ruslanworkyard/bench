@@ -21,6 +21,7 @@ import { baseBranch } from "../detect/git.js";
 import { harnessFiles } from "../detect/harness.js";
 import { setupCommand } from "../detect/setup-command.js";
 import { testCommand } from "../detect/test-command.js";
+import { testFiles } from "../detect/test-files.js";
 import type { Detection } from "../detect/types.js";
 import { copyOps, listFixtures, packagedFixturesDir } from "../fixtures.js";
 import { packagedJudgesDir } from "../judges.js";
@@ -32,6 +33,8 @@ export type InitOptions = {
   cwd: string;
   base?: string | undefined;
   test?: string | undefined;
+  /** Globs from --test-files, in order; none means detection decides. */
+  testFiles?: string[] | undefined;
   setup?: string | undefined;
   agent?: string | undefined;
   dryRun: boolean;
@@ -127,6 +130,10 @@ export function init(options: InitOptions): void {
   const agents = agentsOnPath();
 
   const test = override(options.test, "--test", testCommand(root));
+  const globs =
+    options.testFiles !== undefined && options.testFiles.length > 0
+      ? { value: options.testFiles, source: "--test-files flag" }
+      : testFiles(root);
   const setup = override(options.setup, "--setup", setupCommand(root));
   const agent = override(options.agent, "--agent", detectAgent(agents));
   const base = override(options.base, "--base", baseBranch(root));
@@ -139,6 +146,7 @@ export function init(options: InitOptions): void {
     ...defaults(),
     ...(base === null ? {} : { baseBranch: base.value }),
     testCommand: test?.value ?? "",
+    testFiles: globs?.value ?? [],
     setupCommand: setup?.value ?? "",
     agent: {
       ...defaults().agent,
@@ -194,6 +202,7 @@ export function init(options: InitOptions): void {
     dryRun: options.dryRun,
     harness,
     testCommand: test,
+    testFiles: globs,
     setupCommand: setup,
     agent,
     agentsOnPath: agents?.value ?? [],

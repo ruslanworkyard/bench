@@ -17,6 +17,7 @@ export type Report = {
   dryRun: boolean;
   harness: HarnessEntry[];
   testCommand: Detection<string> | null;
+  testFiles: Detection<string[]> | null;
   setupCommand: Detection<string> | null;
   agent: Detection<string> | null;
   agentsOnPath: string[];
@@ -32,7 +33,7 @@ const LABEL_WIDTH = 14;
 
 function field(label: string, detection: Detection<string> | null, fallback: string): string {
   if (detection === null) return `${label.padEnd(LABEL_WIDTH)}${fallback}`;
-  return `${label.padEnd(LABEL_WIDTH)}${detection.value.padEnd(24)}${detection.source}`;
+  return `${label.padEnd(LABEL_WIDTH)}${detection.value.padEnd(22)}  ${detection.source}`;
 }
 
 function statusLabel(status: OpStatus, dryRun: boolean): string {
@@ -70,6 +71,9 @@ export function formatSummary(report: Report): string {
 
   lines.push("");
   lines.push(field("Test command", report.testCommand, "none detected"));
+  if (report.testCommand?.hint !== undefined) lines.push(`${" ".repeat(LABEL_WIDTH)}${report.testCommand.hint}`);
+  const globs = report.testFiles === null ? null : { ...report.testFiles, value: report.testFiles.value.join(" ") };
+  lines.push(field("Test files", globs, "none detected (set testFiles to run only the agent's tests)"));
   lines.push(
     field(
       "Setup command",
