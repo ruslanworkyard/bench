@@ -1,5 +1,6 @@
 // Type-only: commands/judge.ts imports commands/compare.ts, which imports this file.
 import type { JudgeRecord, VerdictRecord } from "./commands/judge.js";
+import { DEFAULT_TEST_LABEL } from "./config.js";
 import { formatCount, formatDuration, formatUsd } from "./print.js";
 import type { RunRecord } from "./run-record.js";
 import type { Telemetry } from "./telemetry.js";
@@ -302,7 +303,13 @@ const NUMERIC_ROWS: NumericSpec[] = [
 /** Rows from this one down measure effort, which a run that was cut off did not finish spending. */
 const FIRST_EFFORT_ROW = "turns";
 
-export function compare(previous: RunRecord, candidate: RunRecord, judgement: JudgeInput | null): Comparison {
+/** `testLabel` is the tests row's label, `config.testLabel`. */
+export function compare(
+  previous: RunRecord,
+  candidate: RunRecord,
+  judgement: JudgeInput | null,
+  testLabel: string = DEFAULT_TEST_LABEL,
+): Comparison {
   const warnings: string[] = [];
   const incomplete: Side[] = [];
   for (const [side, record] of [
@@ -335,7 +342,7 @@ export function compare(previous: RunRecord, candidate: RunRecord, judgement: Ju
     );
   }
 
-  const rows: Row[] = [outcomeRow(previous, candidate), testsRow(previous, candidate)];
+  const rows: Row[] = [outcomeRow(previous, candidate), testsRow(previous, candidate, testLabel)];
   let effort = false;
   for (const spec of NUMERIC_ROWS) {
     if (spec.id === FIRST_EFFORT_ROW) effort = true;
@@ -464,25 +471,16 @@ function outcomeRow(previous: RunRecord, candidate: RunRecord): Row {
   };
 }
 
-function testsState(record: RunRecord): "passed" | "failed" | "not configured" {
-  if (record.tests === null) return "not configured";
-  return record.tests.exitCode === 0 && !record.tests.timedOut ? "passed" : "failed";
-}
-
-function testsRow(previous: RunRecord, candidate: RunRecord): Row {
-  const before = testsState(previous);
-  const after = testsState(candidate);
-  const row: Row = {
-    id: "tests",
-    label: "Tests",
-    previous: before,
-    candidate: after,
-    delta: "",
-    classification: "n/a",
-  };
-  if (before === "not configured" || after === "not configured") {
-    return { ...row, note: "no test command configured" };
-  }
+/**
+ * `passed` is the best state; `failed` and `none written` are both worse, and neither is ranked
+ * above the other here (the judges say which is worse). A side that ran no tests at all makes
+ * the row n/a.
+ */
+function testsRow(previous: RunRecord, candidate: RunRecord, label: string): Row {
+  const before = previous.tests.state;
+  const after = candidate.tests.state;
+  const row: Row = { id: "tests", label, previous: before, candidate: after, delta: "", classification: "n/a" };
+  if (before === "not run" || after === "not run") return { ...row, note: "not run in this environment" };
   return { ...row, classification: stateClassification(before === "passed", after === "passed") };
 }
 

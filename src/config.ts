@@ -18,6 +18,7 @@ export const DEFAULT_BASE_BRANCH = "main";
 export const DEFAULT_TIMEOUT_MINUTES = 20;
 export const DEFAULT_MAX_CONTEXT_KB = 512;
 export const DEFAULT_JUDGES = ["code-quality", "engineering-practices", "test-quality"];
+export const DEFAULT_TEST_LABEL = "Agent's tests";
 
 /** How one agent is driven. `name` picks the adapter; the rest is that adapter's business. */
 export type AgentConfig = {
@@ -57,7 +58,15 @@ export type JudgeConfig = {
 
 export type Config = {
   baseBranch: string;
+  /**
+   * Run after the agent. `{files}` / `{dirs}` narrow it to the test files the agent wrote (and
+   * nothing runs when it wrote none); without either it runs as is. Empty means no tests run.
+   */
   testCommand: string;
+  /** Globs, repo-relative, `**` supported: which of the agent's changed files are tests. */
+  testFiles: string[];
+  /** The tests row's label: "Lint", "Build" for a project whose verification is not a test runner. */
+  testLabel: string;
   /** Run in the workspace before the agent starts, to install dependencies. Empty means none. */
   setupCommand: string;
   agent: AgentConfig;
@@ -67,7 +76,7 @@ export type Config = {
   judges: string[];
 };
 
-const TOP_KEYS = ["baseBranch", "testCommand", "setupCommand", "agent", "harness", "judge", "judges"] as const;
+const TOP_KEYS = ["baseBranch", "testCommand", "testFiles", "testLabel", "setupCommand", "agent", "harness", "judge", "judges"] as const;
 const JUDGE_KEYS = ["provider", "model", "apiKeyEnv", "baseUrl", "structuredOutputs", "maxContextKb"] as const;
 const AGENT_KEYS = [
   "name",
@@ -84,6 +93,8 @@ export function defaults(): Config {
   return {
     baseBranch: DEFAULT_BASE_BRANCH,
     testCommand: "",
+    testFiles: [],
+    testLabel: DEFAULT_TEST_LABEL,
     setupCommand: "",
     agent: {
       name: "",
@@ -234,6 +245,9 @@ export function validate(value: unknown): Config {
 
   config.baseBranch = stringField(raw, "baseBranch", '"baseBranch"') ?? config.baseBranch;
   config.testCommand = stringField(raw, "testCommand", '"testCommand"') ?? config.testCommand;
+  // Both absent in configs written before test selection; those run the whole suite as before.
+  config.testFiles = stringArray(raw, "testFiles", '"testFiles"') ?? config.testFiles;
+  config.testLabel = stringField(raw, "testLabel", '"testLabel"') ?? config.testLabel;
   // Absent in configs written before it existed; those keep loading as "no setup".
   config.setupCommand = stringField(raw, "setupCommand", '"setupCommand"') ?? config.setupCommand;
   if (config.baseBranch.trim() === "") fail('"baseBranch" must not be empty');

@@ -30,8 +30,10 @@ import {
   type Environment,
   type RunOutcome,
   type RunRecord,
+  type TestResult,
 } from "../run-record.js";
 import { telemetry } from "../telemetry.js";
+import { expandTestCommand, selectTests } from "../test-selection.js";
 import { withWorkspace, type Workspace } from "../workspace.js";
 import { loadJudgement, printReport, saveReport, type ReportOutput } from "./compare.js";
 import { defaultDeps, judgePair, type JudgeDeps } from "./judge.js";
@@ -75,7 +77,7 @@ export type ProgressEvent =
   | { kind: "started" }
   | { kind: "setup"; result: CommandResult }
   | { kind: "agent"; outcome: RunOutcome; turns: number }
-  | { kind: "tests"; result: CommandResult | null }
+  | { kind: "tests"; result: TestResult }
   | { kind: "recorded"; runId: string };
 
 /** Everything one side of a run needs that the other side shares. */
@@ -93,6 +95,7 @@ type Side = {
   agentPath: string;
   setupCommand: string;
   testCommand: string;
+  testFiles: string[];
   keep: boolean;
   progress: (event: ProgressEvent) => void;
 };
@@ -154,6 +157,7 @@ export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): P
     agentPath,
     setupCommand: config.setupCommand,
     testCommand: config.testCommand,
+    testFiles: config.testFiles,
     keep: options.keep,
   };
   const start = limiter(options.concurrency);
@@ -209,7 +213,7 @@ export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): P
         if (!(error instanceof CliError)) throw error;
         sayOnce(`judge rows skipped: ${oneLine(error.message)}`);
       }
-      outcome.comparison = compare(...pair, judgement);
+      outcome.comparison = compare(...pair, judgement, config.testLabel);
       return outcome;
     }),
   );
@@ -354,8 +358,7 @@ async function runSide(side: Side): Promise<SideResult> {
       const diff = await ws.diff();
       writeFileSync(join(runDir, "diff.patch"), diff, "utf8");
 
-      const tests =
-        side.testCommand === "" ? null : await runLogged(ws, side.testCommand, join(runDir, "test.log"));
+      const tests = await runTests(ws, side, join(runDir, "test.log"));
       side.progress({ kind: "tests", result: tests });
 
       const transcript = result.transcript.map((event) => JSON.stringify(event));
@@ -412,13 +415,34 @@ function setupFailed(side: Side, setup: CommandResult, logPath: string): CliErro
   );
 }
 
+/**
+ * The test step, after the diff: the test files the agent added or changed, and the test command
+ * narrowed to them. Nothing runs when the command is empty (`not run`) or has a placeholder and
+ * there are no such files (`none written`). The list is also `HB_TEST_FILES`, one per line.
+ */
+async function runTests(ws: Workspace, side: Side, logPath: string): Promise<TestResult> {
+  const idle = { command: null, exitCode: null, durationMs: 0, timedOut: false };
+  if (side.testCommand === "") return { state: "not run", files: [], ...idle };
+  const files = selectTests(await ws.changedFiles(), side.testFiles);
+  const command = expandTestCommand(side.testCommand, files);
+  if (command === null) return { state: "none written", files, ...idle };
+  const result = await runLogged(ws, command, logPath, { HB_TEST_FILES: files.join("\n") });
+  return { ...result, state: result.exitCode === 0 && !result.timedOut ? "passed" : "failed", files };
+}
+
 /** Runs a command in the workspace tree, keeping its output as `logPath`. */
-async function runLogged(ws: Workspace, command: string, logPath: string): Promise<CommandResult> {
+async function runLogged(
+  ws: Workspace,
+  command: string,
+  logPath: string,
+  env: Record<string, string> = {},
+): Promise<CommandResult> {
   const log = createWriteStream(logPath);
   const write = (chunk: string): void => {
     log.write(chunk);
   };
   const result = await ws.exec(command, {
+    env,
     timeoutMs: COMMAND_TIMEOUT_MS,
     onStdout: write,
     onStderr: write,

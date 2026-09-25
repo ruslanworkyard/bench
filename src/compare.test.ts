@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import type { JudgeRecord, VerdictRecord } from "./commands/judge.js";
 import { compare, rollup, type Classification, type Comparison, type JudgeInput, type Row } from "./compare.js";
-import type { RunRecord } from "./run-record.js";
+import type { RunRecord, TestState } from "./run-record.js";
 import type { Telemetry } from "./telemetry.js";
 
 /** Telemetry to match the record below: 40 calls on main, one Explore sub-agent with 10. */
@@ -53,7 +53,7 @@ function record(patch: Partial<RunRecord> = {}): RunRecord {
     toolFailures: 2,
     telemetry: telemetry(),
     diff: { files: 5, added: 200, removed: 20 },
-    tests: { command: "npm test", exitCode: 0, durationMs: 12000, timedOut: false },
+    tests: { state: "passed", command: "npm test", files: [], exitCode: 0, durationMs: 12000, timedOut: false },
     finalMessage: "Added a TTL cache.",
     ...patch,
   };
@@ -141,17 +141,47 @@ test("outcome: completed is best, everything else is a state change", () => {
   assert.equal(same.candidate, "error");
 });
 
-test("tests: passed is best; n/a when either side has no test command", () => {
-  const failed = { command: "npm test", exitCode: 1, durationMs: 100, timedOut: false };
-  const timedOut = { command: "npm test", exitCode: null, durationMs: 100, timedOut: true };
-  assert.equal(row(pair({ tests: failed }).rows, "tests").classification, "improved");
-  assert.equal(row(pair({}, { tests: timedOut }).rows, "tests").classification, "regressed");
-  assert.equal(row(pair({ tests: failed }, { tests: failed }).rows, "tests").classification, "unchanged");
+test("tests: passed is best; failed and none written are worse and not ranked; not run is n/a", () => {
+  const tests = (state: TestState): RunRecord["tests"] => ({
+    state,
+    command: state === "passed" || state === "failed" ? "npm test" : null,
+    files: [],
+    exitCode: state === "passed" ? 0 : state === "failed" ? 1 : null,
+    durationMs: 100,
+    timedOut: false,
+  });
+  const classify = (before: TestState, after: TestState) =>
+    row(pair({ tests: tests(before) }, { tests: tests(after) }).rows, "tests");
+  const expected: Array<[TestState, TestState, string]> = [
+    ["passed", "passed", "unchanged"],
+    ["passed", "failed", "regressed"],
+    ["passed", "none written", "regressed"],
+    ["failed", "passed", "improved"],
+    ["none written", "passed", "improved"],
+    ["failed", "failed", "unchanged"],
+    ["none written", "none written", "unchanged"],
+    ["none written", "failed", "unchanged"],
+    ["failed", "none written", "unchanged"],
+  ];
+  for (const [before, after, classification] of expected) {
+    const found = classify(before, after);
+    assert.equal(found.classification, classification, `${before} → ${after}`);
+    assert.equal(found.previous, before);
+    assert.equal(found.candidate, after);
+    assert.equal(found.note, undefined);
+  }
+  for (const state of ["passed", "failed", "none written", "not run"] as const) {
+    for (const [before, after] of [["not run", state], [state, "not run"]] as const) {
+      const found = classify(before, after);
+      assert.equal(found.classification, "n/a", `${before} → ${after}`);
+      assert.equal(found.note, "not run in this environment");
+    }
+  }
+});
 
-  const missing = row(pair({}, { tests: null }).rows, "tests");
-  assert.equal(missing.classification, "n/a");
-  assert.equal(missing.candidate, "not configured");
-  assert.equal(missing.note, "no test command configured");
+test("tests: the row keeps its id and takes the label it is given, the default otherwise", () => {
+  assert.equal(row(pair({}).rows, "tests").label, "Agent's tests");
+  assert.equal(row(compare(previous(), record(), null, "Lint").rows, "tests").label, "Lint");
 });
 
 test("numeric rows: lower is better, shown as counts or percentages", () => {

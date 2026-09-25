@@ -1,7 +1,7 @@
 import type { Usage } from "./agents/types.js";
 import { rollup, type Comparison, type Rollup } from "./compare.js";
 import { RUNS_DIR } from "./config.js";
-import type { CommandResult, RunOutcome, RunRecord } from "./run-record.js";
+import type { CommandResult, RunOutcome, RunRecord, TestResult } from "./run-record.js";
 
 /**
  * One batch as one object: what `run`, `compare` and `judge` print (summary, markdown or JSON)
@@ -25,8 +25,7 @@ export type SideSummary = {
   costUsd: number | null;
   /** Null when no setup command is configured. */
   setup: CommandResult | null;
-  /** Null when no test command is configured. */
-  tests: CommandResult | null;
+  tests: TestResult;
   diff: RunRecord["diff"];
   finalMessage: string;
   /** Relative to the repository root. */

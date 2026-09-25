@@ -1,6 +1,7 @@
 {
   "baseBranch": "main",
-  "testCommand": "npm test",
+  "testCommand": "npm run build && node --test $(printf '%s\\n' {files} | sed 's#^src/#dist/#; s#\\.ts$#.js#')",
+  "testFiles": ["src/**/*.test.ts"],
   "setupCommand": "npm ci",
   "agent": {
     "name": "claude-code",

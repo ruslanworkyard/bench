@@ -105,7 +105,7 @@ function record(stamp: string, environment: Environment, patch: Partial<RunRecor
     toolCalls: { Read: 1 },
     toolFailures: 0,
     diff: { files: 1, added: 1, removed: 0 },
-    tests: { command: "npm test", exitCode: 0, durationMs: 12000, timedOut: false },
+    tests: { state: "passed", command: "npm test", files: [], exitCode: 0, durationMs: 12000, timedOut: false },
     finalMessage: "done",
     ...patch,
   };

@@ -36,6 +36,19 @@ test("a config without setupCommand loads as no setup; with it, the command roun
   rejects({ setupCommand: ["npm", "ci"] }, /"setupCommand" must be a string, found an array/);
 });
 
+test("a config without testFiles or testLabel loads with the defaults; with them, they round-trip", () => {
+  const before = { baseBranch: "main", testCommand: "npm test" };
+  assert.deepEqual(validate(before).testFiles, []);
+  assert.equal(validate(before).testLabel, "Agent's tests");
+  const set = validate({ ...before, testCommand: "node --test {files}", testFiles: ["src/**/*.test.ts"], testLabel: "Lint" });
+  assert.deepEqual(set.testFiles, ["src/**/*.test.ts"]);
+  assert.equal(set.testLabel, "Lint");
+  assert.equal(set.testCommand, "node --test {files}");
+  rejects({ testFiles: "src/**/*.test.ts" }, /"testFiles" must be an array of strings/);
+  rejects({ testLabel: 3 }, /"testLabel" must be a string/);
+  rejects({ testFile: [] }, /unknown key "testFile"/);
+});
+
 test("a config without a judge block loads with the judge defaults; a full block round-trips", () => {
   const older = validate({ baseBranch: "main", testCommand: "npm test" });
   assert.deepEqual(older.judge, {

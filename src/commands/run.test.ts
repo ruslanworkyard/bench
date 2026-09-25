@@ -259,8 +259,10 @@ test("run drives the agent in a workspace, once per environment, and leaves comp
   assert.ok(record.diff.files >= 1, JSON.stringify(record.diff));
   assert.equal(record.diff.added, 1);
   assert.equal(record.diff.removed, 0);
-  assert.deepEqual(record.tests && { ...record.tests, durationMs: 0 }, {
+  assert.deepEqual({ ...record.tests, durationMs: 0 }, {
+    state: "passed",
     command: "echo tests ok",
+    files: [],
     exitCode: 0,
     durationMs: 0,
     timedOut: false,
@@ -381,8 +383,9 @@ test("a failing test command is a result, not a failure of the run", () => {
 
   const record = readRunRecord(runDir(root));
   assert.equal(record.outcome, "completed");
-  assert.equal(record.tests?.exitCode, 1);
-  assert.equal(record.tests?.timedOut, false);
+  assert.equal(record.tests.state, "failed");
+  assert.equal(record.tests.exitCode, 1);
+  assert.equal(record.tests.timedOut, false);
   assert.match(readFileSync(join(runDir(root), "test.log"), "utf8"), /the suite is broken/);
   // --detail prints the markdown report instead of the summary.
   assert.equal(stdout, readReport(root, "report.md"));
@@ -478,14 +481,68 @@ test("no setup command means nothing runs before the agent, and no log", () => {
   assert.equal(reportOf(root).fixtures[0]?.sides.candidate?.setup, null);
 });
 
-test("no test command means tests are not configured, and nothing is run", () => {
-  const root = repoWithFake("fake-claude.sh", { testCommand: "" });
+test("an empty test command means tests are not run in this environment, and nothing is run", () => {
+  const root = repoWithFake("test-writing-claude.sh", { testCommand: "", testFiles: ["src/**/*.test.ts"] });
 
   const { stdout } = ok(root, "run", "ttl-cache", "--detail");
 
-  assert.equal(readRunRecord(runDir(root)).tests, null);
+  assert.deepEqual(readRunRecord(runDir(root)).tests, {
+    state: "not run",
+    command: null,
+    files: [],
+    exitCode: null,
+    durationMs: 0,
+    timedOut: false,
+  });
   assert.equal(existsSync(join(runDir(root), "test.log")), false);
-  assert.match(stdout, /\| none \| not configured \| 1 file/);
+  assert.match(stdout, /\| none \| not run in this environment \| 2 files/);
+  assert.match(stdout, /^\| Agent's tests \| not run \| not run \|  \| n\/a \| not run in this environment \|$/m);
+});
+
+/** Prints what the test command was handed, so test.log says it. */
+const ECHO_FILES = `echo "files: {files}"; echo "dirs: {dirs}"; echo "env: $HB_TEST_FILES"`;
+
+test("a test command with placeholders runs only the test files the agent wrote", () => {
+  const root = repoWithFake("test-writing-claude.sh", { testCommand: ECHO_FILES, testFiles: ["src/**/*.test.ts"], testLabel: "Lint" });
+
+  const { stdout } = ok(root, "run", "ttl-cache", "--detail");
+
+  const { tests } = readRunRecord(runDir(root));
+  assert.equal(tests.state, "passed");
+  assert.deepEqual(tests.files, ["src/answer.test.ts"]);
+  assert.equal(tests.command, `echo "files: src/answer.test.ts"; echo "dirs: ./src"; echo "env: $HB_TEST_FILES"`);
+  const log = readFileSync(join(runDir(root), "test.log"), "utf8");
+  assert.match(log, /^files: src\/answer\.test\.ts$/m);
+  assert.match(log, /^dirs: \.\/src$/m);
+  assert.match(log, /^env: src\/answer\.test\.ts$/m);
+  // The label is the config's, in the table and the side summary.
+  assert.match(stdout, /^\| Lint \| passed \| passed \|  \| unchanged \|  \|$/m);
+  assert.match(stdout, /\| Setup \| Lint \| Changes \|/);
+  assert.match(stdout, /→ passed in \S+ \(1 file\) \|/);
+});
+
+test("an agent that writes no test file has none written, and the placeholder command never runs", () => {
+  const root = repoWithFake("fake-claude.sh", { testCommand: ECHO_FILES, testFiles: ["src/**/*.test.ts"] });
+
+  const { stdout } = ok(root, "run", "ttl-cache", "--detail");
+
+  const { tests } = readRunRecord(runDir(root));
+  assert.deepEqual(tests, { state: "none written", command: null, files: [], exitCode: null, durationMs: 0, timedOut: false });
+  assert.equal(existsSync(join(runDir(root), "test.log")), false);
+  assert.match(stdout, /\| none \| none written \| 1 file/);
+  assert.match(stdout, /^\| Agent's tests \| none written \| none written \|  \| unchanged \|  \|$/m);
+});
+
+test("a test command without placeholders runs as it is, the whole suite, with the files in the environment", () => {
+  const root = repoWithFake("test-writing-claude.sh", { testCommand: `echo "env: $HB_TEST_FILES"`, testFiles: ["src/**/*.test.ts"] });
+
+  ok(root, "run", "ttl-cache");
+
+  const { tests } = readRunRecord(runDir(root));
+  assert.equal(tests.state, "passed");
+  assert.equal(tests.command, `echo "env: $HB_TEST_FILES"`);
+  assert.deepEqual(tests.files, ["src/answer.test.ts"]);
+  assert.match(readFileSync(join(runDir(root), "test.log"), "utf8"), /^env: src\/answer\.test\.ts$/m);
 });
 
 test("an agent that hangs is a timeout: exit 2, and the record is still written", () => {

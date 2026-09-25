@@ -98,7 +98,7 @@ export async function judge(options: JudgeOptions, deps: JudgeDeps = defaultDeps
   const config = requireConfig(root);
   const [previous, candidate] = loadPair(root, "judge", options);
   const result = await judgePair(root, config, previous, candidate, deps, options.all);
-  const comparison = compare(previous, candidate, loadJudgement(root, config, previous, candidate));
+  const comparison = compare(previous, candidate, loadJudgement(root, config, previous, candidate), config.testLabel);
   const path = rewriteBatchReport(root, config, previous, candidate, options.stepSummary);
   printReport(pairReport(previous, candidate, comparison), options, path);
   return result.record;

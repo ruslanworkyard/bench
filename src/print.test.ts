@@ -28,7 +28,7 @@ function comparison(warnings: string[] = []): Comparison {
     candidate: { runId: "20260919-031455-ttl-cache-candidate", harnessSha: "0123456789abcdef0123456789abcdef01234567", model: null },
     rows: [
       row({ id: "outcome", label: "Outcome", previous: "completed", candidate: "completed" }),
-      row({ id: "tests", label: "Tests", previous: "not configured", candidate: "passed", classification: "n/a", note: "no test command configured" }),
+      row({ id: "tests", label: "Tests", previous: "not run", candidate: "passed", classification: "n/a", note: "not run in this environment" }),
       row({ id: "tokens.total", label: "Tokens", previous: "1,203,000", candidate: "960,000", delta: "-21%", classification: "improved" }),
       row({ id: "toolCalls", label: "Tool calls", previous: "18", candidate: "15", delta: "-3", note: "within noise" }),
       row({ id: "durationMs", label: "Duration", previous: "3m48s", candidate: "1h02m", delta: "+1,532%", classification: "regressed" }),
@@ -60,7 +60,7 @@ test("formatComparisonMarkdown renders a valid GitHub table with the same conten
     assert.match(line, /^\| .* \|$/);
     assert.equal(line.split(" | ").length, 6, line);
   }
-  assert.equal(body[1], "| Tests | not configured | passed |  | n/a | no test command configured |");
+  assert.equal(body[1], "| Tests | not run | passed |  | n/a | not run in this environment |");
   assert.equal(body[2], "| Tokens | 1,203,000 | 960,000 | -21% | improved |  |");
   // A blank line separates every block, so the table is not glued to the paragraph above it.
   assert.equal(lines[header - 1], "");
@@ -102,7 +102,7 @@ function runRecord(patch: Partial<RunRecord> = {}): RunRecord {
       phases: { exploringMs: 62000, buildingMs: 150000, verifyingMs: 40000 },
     },
     diff: { files: 5, added: 212, removed: 7 },
-    tests: { command: "npm test", exitCode: 0, durationMs: 12000, timedOut: false },
+    tests: { state: "passed", command: "npm test", files: [], exitCode: 0, durationMs: 12000, timedOut: false },
     finalMessage: "Added a TTL cache.",
     ...patch,
   };
@@ -145,6 +145,9 @@ test("formatComparisonMarkdown puts the judge rows in the same table with the wh
 test("formatProgress puts one clock, an aligned fixture column and an aligned environment column before every event", () => {
   const ok = { command: "npm ci", exitCode: 0, durationMs: 800, timedOut: false };
   const failed = { command: "npm test", exitCode: 1, durationMs: 18_400, timedOut: false };
+  const files = ["src/a.test.ts", "src/b.test.ts"];
+  const ran = { state: "passed" as const, command: "npm test", files, exitCode: 0, durationMs: 18_000, timedOut: false };
+  const idle = { command: null, files: [], exitCode: null, durationMs: 0, timedOut: false };
   const width = "holiday-api-client".length;
   const lines = [
     formatProgress(0, "ttl-cache", width, "previous", { kind: "started" }),
@@ -152,10 +155,11 @@ test("formatProgress puts one clock, an aligned fixture column and an aligned en
     formatProgress(1_200, "ttl-cache", width, "candidate", { kind: "setup", result: { ...failed, command: "npm ci" } }),
     formatProgress(301_000, "ttl-cache", width, "previous", { kind: "agent", outcome: "completed", turns: 30 }),
     formatProgress(346_000, "ttl-cache", width, "candidate", { kind: "agent", outcome: "max_turns", turns: 1 }),
-    formatProgress(319_000, "ttl-cache", width, "previous", { kind: "tests", result: { ...ok, command: "npm test", durationMs: 18_000 } }),
-    formatProgress(319_000, "ttl-cache", width, "previous", { kind: "tests", result: failed }),
-    formatProgress(319_000, "ttl-cache", width, "previous", { kind: "tests", result: { ...failed, exitCode: null, timedOut: true } }),
-    formatProgress(319_000, "ttl-cache", width, "previous", { kind: "tests", result: null }),
+    formatProgress(319_000, "ttl-cache", width, "previous", { kind: "tests", result: ran }),
+    formatProgress(319_000, "ttl-cache", width, "previous", { kind: "tests", result: { ...ran, state: "failed", exitCode: 1, files: ["src/a.test.ts"] } }),
+    formatProgress(319_000, "ttl-cache", width, "previous", { kind: "tests", result: { ...ran, state: "failed", exitCode: null, timedOut: true } }),
+    formatProgress(319_000, "ttl-cache", width, "previous", { kind: "tests", result: { ...idle, state: "none written" } }),
+    formatProgress(319_000, "ttl-cache", width, "previous", { kind: "tests", result: { ...idle, state: "not run" } }),
     formatProgress(3_600_000, "ttl-cache", width, "previous", { kind: "recorded", runId: "20260922-101500-ttl-cache-previous" }),
   ];
   assert.deepEqual(lines, [
@@ -164,10 +168,11 @@ test("formatProgress puts one clock, an aligned fixture column and an aligned en
     "[00:01] ttl-cache           candidate  setup failed (npm ci, exit 1, 18s)",
     "[05:01] ttl-cache           previous   agent completed (30 turns)",
     "[05:46] ttl-cache           candidate  agent max_turns (1 turn)",
-    "[05:19] ttl-cache           previous   tests passed (18s)",
-    "[05:19] ttl-cache           previous   tests failed (exit 1, 18s)",
-    "[05:19] ttl-cache           previous   tests failed (timed out, 18s)",
-    "[05:19] ttl-cache           previous   tests not configured",
+    "[05:19] ttl-cache           previous   tests passed (2 files, 18s)",
+    "[05:19] ttl-cache           previous   tests failed (1 file, exit 1, 18s)",
+    "[05:19] ttl-cache           previous   tests failed (2 files, timed out, 18s)",
+    "[05:19] ttl-cache           previous   tests: none written",
+    "[05:19] ttl-cache           previous   tests not run",
     "[60:00] ttl-cache           previous   recorded .harnessbench/runs/20260922-101500-ttl-cache-previous",
   ]);
   // One fixture: the column is as wide as its id.

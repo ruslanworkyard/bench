@@ -113,8 +113,7 @@ function scrub(text: string, pair: PairMaterial): string {
 
 /** The fact only, never the log: the judge weighs the tests, the suite reports on them. */
 function testResult(record: RunRecord): string {
-  if (record.tests === null) return "not configured";
-  return record.tests.exitCode === 0 && !record.tests.timedOut ? "passed" : "failed";
+  return record.tests.state;
 }
 
 function firstLine(text: string): string {

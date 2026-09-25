@@ -49,7 +49,7 @@ export function compare(options: CompareOptions): BatchReport {
   const root = requireRepo(options.cwd);
   const config = requireConfig(root);
   const [previous, candidate] = loadPair(root, "compare", options);
-  const comparison = compareRecords(previous, candidate, loadJudgement(root, config, previous, candidate));
+  const comparison = compareRecords(previous, candidate, loadJudgement(root, config, previous, candidate), config.testLabel);
   const report = pairReport(previous, candidate, comparison);
   const path = rewriteBatchReport(root, config, previous, candidate, options.stepSummary);
   printReport(report, { ...options, detail: options.detail === true || options.markdown }, path);
@@ -201,7 +201,7 @@ export function compareBatchRecords(root: string, config: Config, batch: Batch):
     }
     // A judge the config names but the catalogue lacks is the same refusal a single compare gives.
     const judgement = loadJudgement(root, config, ...ordered);
-    return { fixture: pair.fixture, comparison: compareRecords(...ordered, judgement), error: null };
+    return { fixture: pair.fixture, comparison: compareRecords(...ordered, judgement, config.testLabel), error: null };
   });
   return {
     stamp: batch.stamp,

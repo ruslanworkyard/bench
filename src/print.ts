@@ -1,13 +1,13 @@
 import { relative } from "node:path";
 
 import { JUDGE_ROW_PREFIX, type Classification, type Comparison, type Rollup, type RollupRow } from "./compare.js";
-import { ENV_FILE, RUNS_DIR } from "./config.js";
+import { DEFAULT_TEST_LABEL, ENV_FILE, RUNS_DIR } from "./config.js";
 import type { HarnessEntry } from "./detect/harness.js";
 import type { Detection } from "./detect/types.js";
 import type { ProgressEvent } from "./commands/run.js";
 import type { OpStatus } from "./plan.js";
 import type { BatchReport, ReportFixture, SideSummary } from "./report.js";
-import { REPORT_MARKDOWN, reportDir, type CommandResult } from "./run-record.js";
+import { REPORT_MARKDOWN, reportDir, type CommandResult, type TestResult } from "./run-record.js";
 
 export type FileReport = { path: string; status: OpStatus };
 
@@ -162,12 +162,16 @@ function setupLine(setup: CommandResult): string {
   return `${setup.command} → failed (${how}) in ${took}`;
 }
 
-function testsLine(tests: CommandResult | null): string {
-  if (tests === null) return "not configured";
-  if (tests.timedOut) return `${tests.command} → timed out after ${formatDuration(tests.durationMs)}`;
-  if (tests.exitCode === 0) return `${tests.command} → passed in ${formatDuration(tests.durationMs)}`;
+/** `node --test dist/a.test.js → passed in 3s (1 file)`, `none written`, or `not run in this environment`. */
+function testsLine(tests: TestResult): string {
+  if (tests.state === "not run") return "not run in this environment";
+  if (tests.state === "none written" || tests.command === null) return tests.state;
+  const files = tests.files.length === 0 ? "" : ` (${plural(tests.files.length, "file")})`;
+  const took = formatDuration(tests.durationMs);
+  if (tests.timedOut) return `${tests.command} → timed out after ${took}${files}`;
+  if (tests.state === "passed") return `${tests.command} → passed in ${took}${files}`;
   const how = tests.exitCode === null ? "killed" : `exit ${tests.exitCode}`;
-  return `${tests.command} → failed, ${how}`;
+  return `${tests.command} → failed, ${how}${files}`;
 }
 
 /** `0.8s` for anything under ten seconds, then as `formatDuration`. */
@@ -176,7 +180,7 @@ function seconds(ms: number): string {
 }
 
 /** How a setup or test command ended: `exit 1`, `killed`, or `timed out`. */
-function ended(result: CommandResult): string {
+function ended(result: Pick<CommandResult, "exitCode" | "timedOut">): string {
   if (result.timedOut) return "timed out";
   return result.exitCode === null ? "killed" : `exit ${result.exitCode}`;
 }
@@ -227,9 +231,11 @@ function progressText(event: ProgressEvent): string {
       return `agent ${event.outcome} (${plural(event.turns, "turn")})`;
     case "tests": {
       const { result } = event;
-      if (result === null) return "tests not configured";
-      if (result.exitCode === 0 && !result.timedOut) return `tests passed (${seconds(result.durationMs)})`;
-      return `tests failed (${ended(result)}, ${seconds(result.durationMs)})`;
+      if (result.state === "not run") return "tests not run";
+      if (result.state === "none written") return "tests: none written";
+      const files = result.files.length === 0 ? "" : `${plural(result.files.length, "file")}, `;
+      if (result.state === "passed") return `tests passed (${files}${seconds(result.durationMs)})`;
+      return `tests failed (${files}${ended(result)}, ${seconds(result.durationMs)})`;
     }
     case "recorded":
       return `recorded ${RUNS_DIR}/${event.runId}`;
@@ -454,10 +460,13 @@ function tokensText(side: SideSummary): string {
   );
 }
 
-/** The per-side table: one row per side that finished, previous first. */
-function sidesMarkdown(sides: Array<[string, SideSummary]>): string[] {
+/**
+ * The per-side table: one row per side that finished, previous first. `testLabel` heads the
+ * tests column: the comparison's tests row label, which is `config.testLabel`.
+ */
+function sidesMarkdown(sides: Array<[string, SideSummary]>, testLabel: string): string[] {
   const lines = [
-    "| Side | Outcome | Duration | Turns | Tool calls | Tokens | Cost | Setup | Tests | Changes |",
+    `| Side | Outcome | Duration | Turns | Tool calls | Tokens | Cost | Setup | ${cell(testLabel)} | Changes |`,
     "|---|---|---|---|---|---|---|---|---|---|",
   ];
   for (const [name, side] of sides) {
@@ -495,7 +504,8 @@ function fixtureMarkdown(fixture: ReportFixture): string[] {
     return side === null ? [] : [[name, side]];
   });
   if (sides.length > 0) {
-    lines.push(...sidesMarkdown(sides));
+    const testLabel = fixture.comparison?.rows.find((row) => row.id === "tests")?.label ?? DEFAULT_TEST_LABEL;
+    lines.push(...sidesMarkdown(sides, testLabel));
     lines.push("");
     for (const [name, side] of sides) {
       lines.push(`**${name}** final message:`);

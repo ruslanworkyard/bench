@@ -85,6 +85,8 @@ test("init sets up a repository, and a second run changes nothing", () => {
   assert.deepEqual(config, {
     baseBranch: "main",
     testCommand: "npm test",
+    testFiles: [],
+    testLabel: "Agent's tests",
     setupCommand: "",
     agent: {
       name: "claude-code",

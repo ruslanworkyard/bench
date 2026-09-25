@@ -161,6 +161,19 @@ export class Workspace {
     return await git(["diff", "HEAD", "--", ".", ":(exclude).harnessbench"], this.tree);
   }
 
+  /**
+   * The files of `diff()` as `git diff --name-status` lines (`A\tsrc/a.test.ts`), with the same
+   * exclusions; call it after `diff()`, which makes untracked files visible. A rename is a
+   * delete plus an add, and paths are unquoted.
+   */
+  async changedFiles(): Promise<string[]> {
+    const out = await git(
+      ["-c", "core.quotePath=false", "diff", "--name-status", "--no-renames", "HEAD", "--", ".", ":(exclude).harnessbench"],
+      this.tree,
+    );
+    return out.split("\n").filter((line) => line !== "");
+  }
+
   /** Kills every running command's whole process group, as a timeout would. */
   killChildren(): void {
     for (const child of this.children) killGroup(child.pid);

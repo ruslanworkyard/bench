@@ -10,7 +10,7 @@ with the old harness, once with the new one — and reports the difference.
 harnessbench compare  ttl-cache · code 0655c52
 
 Outcome                  completed  → completed                       unchanged
-Tests                    failed     → passed                          improved
+Agent's tests            failed     → passed                          improved
 Lines changed            412        → 219        -47%                 improved
 Turns                    31         → 23         -8                   improved
 Reads before first edit  14         → 6          -8                   improved
@@ -52,6 +52,8 @@ do first.
 {
   "baseBranch": "main",
   "testCommand": "npm test",
+  "testFiles": [],
+  "testLabel": "Agent's tests",
   "setupCommand": "npm ci",
   "agent": {
     "name": "claude-code",
@@ -83,6 +85,44 @@ do first.
 - `harness.extraPaths` adds files or directories that are part of your harness but not
   detected automatically.
 - An unknown key is an error naming it, so a typo is never a silently ignored setting.
+
+### The test command
+
+After each side's agent finishes, harnessbench runs the tests **the agent wrote**, against the
+code it wrote — not your whole suite. Fixtures are tasks in the spirit of your repo, not real
+features, so "did the change break the system" is not the question; "do the agent's own tests
+pass" is. It also keeps a side to seconds instead of a 15-minute suite.
+
+- `testFiles`: globs, relative to the repo root (`**` spans directories), that say which files
+  are tests. Of the files the agent added or modified (deleted ones never count), those matching
+  any glob are the agent's tests.
+- `testCommand` may contain `{files}` — those files, shell-quoted, sorted — and/or `{dirs}` —
+  their directories, each `./`-prefixed. The list is also in `HB_TEST_FILES`, one per line,
+  for mappings too awkward inline. A command with neither placeholder runs as written: the
+  whole suite, as before.
+- `testLabel` names the row (default `Agent's tests`); use `Lint` or `Build` when your check is
+  not a test runner.
+
+```jsonc
+// pytest
+"testFiles": ["**/test_*.py", "**/*_test.py"], "testCommand": "pytest {files}"
+// Pest (PHP)
+"testFiles": ["tests/**/*Test.php"], "testCommand": "vendor/bin/pest {files}"
+// Jest
+"testFiles": ["**/*.test.ts", "**/*.test.tsx"], "testCommand": "npx jest {files}"
+// TypeScript compiled first, tests run from dist/ (this repo)
+"testFiles": ["src/**/*.test.ts"],
+"testCommand": "npm run build && node --test $(printf '%s\\n' {files} | sed 's#^src/#dist/#; s#\\.ts$#.js#')"
+```
+
+The row reads, per side:
+
+- `passed` / `failed`: the command ran and exited zero / did not (or timed out).
+- `none written`: the command has a placeholder and the agent wrote no test file, so nothing ran.
+  Worse than `passed`, not ranked against `failed` — the judges say which is worse.
+- `not run`: `testCommand` is `""`. For an environment that cannot run tests at all — an iOS app
+  on a Linux runner — this is a deliberate gap, and the row says `n/a — not run in this
+  environment` instead of pretending to a result.
 
 ### Credentials
 

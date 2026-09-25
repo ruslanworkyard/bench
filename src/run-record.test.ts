@@ -55,7 +55,7 @@ function record(): RunRecord {
       phases: { exploringMs: 60000, buildingMs: 150000, verifyingMs: 42000 },
     },
     diff: { files: 5, added: 212, removed: 7 },
-    tests: { command: "npm test", exitCode: 0, durationMs: 12000, timedOut: false },
+    tests: { state: "passed", command: "npm test", files: [], exitCode: 0, durationMs: 12000, timedOut: false },
     finalMessage: "Added a TTL cache.",
   };
 }
@@ -91,6 +91,34 @@ test("readRunRecord still reads a record written before telemetry existed", () =
   assert.equal(read.telemetry, undefined);
   assert.equal(read.turns, 23);
   assert.notEqual(telemetry, undefined);
+});
+
+test("readRunRecord maps an old record's tests to the new shape: a command result by its exit, null to not run", () => {
+  const dir = tempDir();
+  const old = (tests: unknown): RunRecord => {
+    writeFileSync(join(dir, "run.json"), JSON.stringify({ ...record(), tests }), "utf8");
+    return readRunRecord(dir);
+  };
+  assert.deepEqual(old({ command: "npm test", exitCode: 0, durationMs: 12000, timedOut: false }).tests, {
+    state: "passed",
+    command: "npm test",
+    files: [],
+    exitCode: 0,
+    durationMs: 12000,
+    timedOut: false,
+  });
+  assert.equal(old({ command: "npm test", exitCode: 1, durationMs: 5, timedOut: false }).tests.state, "failed");
+  assert.equal(old({ command: "npm test", exitCode: null, durationMs: 5, timedOut: true }).tests.state, "failed");
+  assert.deepEqual(old(null).tests, {
+    state: "not run",
+    command: null,
+    files: [],
+    exitCode: null,
+    durationMs: 0,
+    timedOut: false,
+  });
+  // A record in today's shape reads as it was written.
+  assert.deepEqual(old(record().tests).tests, record().tests);
 });
 
 test("readRunRecord rejects a run.json with another schema", () => {

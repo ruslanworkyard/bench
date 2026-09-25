@@ -22,13 +22,14 @@ Goal: an open-source npm package (`npx harnessbench`) people adopt. Quality over
 - **One run per fixture per environment.** Agents run at low temperature; repeats cost money.
   Small deltas are reported as within noise, not dressed up as signal. Repeats are an opt-in.
 - **Judges carry the signal.** Almost nothing about code quality is measurable portably across
-  languages. The mechanical layer is: the repo's own test command passes/fails, diff size, and
+  languages. The mechanical layer is: whether the tests the agent wrote pass, diff size, and
   agent telemetry (tokens, cost, time, turns, tool calls). Everything else — correctness
   against the prompt, quality, scope, maintainability, test intent, reasoning efficiency — is
   decided by an AI judge shown `previous` and `candidate` side by side, blind, pairwise.
 - **Fixtures are just tasks.** `fixture.json` (`id`, `kind`, `description`, optional `tags`)
   + `prompt.md`. No pinned commit, no acceptance tests, no hidden files, no scope contract.
-  The agent sees the repo and the prompt. Correctness is judged, regression is the test suite.
+  The agent sees the repo and the prompt. Correctness is judged; the tests row says only
+  whether the agent's own tests pass against its own code.
 - **Fixtures must be realistic engineering work** that is arbitrary enough to build in any
   codebase and unnecessary enough that no codebase already has it. Not katas.
 - **Deltas, not scores.** One row per criterion; a composite may exist for CI gating but never
@@ -64,6 +65,20 @@ Goal: an open-source npm package (`npx harnessbench`) people adopt. Quality over
   the rubric it was produced under, and the table says when a verdict is stale, missing or
   orphaned rather than hiding it. `judge` is incremental and merges into the pair's
   `judge.json`; `compare` never calls a model.
+- **The tests row is the agent's tests, not the suite.** Fixtures are tasks in the spirit of
+  the repo, not real functionality, so "did the change break the system" is not the signal, and
+  a whole suite costs 10–15 minutes a side on a real project. `testFiles` (globs, `**`) picks
+  the test files among the side's added or modified files (`git diff --name-status`, renames as
+  delete + add, deletions never); `testCommand` narrows to them with `{files}` (shell-quoted,
+  sorted) and/or `{dirs}` (their directories, `./`-prefixed), and gets the list as
+  `HB_TEST_FILES` too. A command with neither placeholder runs as is (the whole suite). States:
+  `passed`, `failed`, `none written` (placeholder command, no test files: nothing runs),
+  `not run` (`testCommand` is `""`: an environment that cannot test, e.g. iOS on a Linux runner,
+  a deliberate gap). `passed` beats `failed` and `none written`, which are not ranked against
+  each other (the judges say which is worse); `not run` on either side makes the row n/a. The
+  row keeps id `tests`; its label is `testLabel` (default "Agent's tests"; "Lint", "Build" for a
+  project whose verification is not a test runner). Old records read: a bare command result maps
+  by exit code, `null` to `not run`.
 - **Bin name == package name** so `npx harnessbench` works.
 - **A batch is a stamp.** One `run` invocation runs a set of fixtures under one
   `YYYYMMDD-HHMMSS` stamp; nothing else on disk names the batch. A pair is
@@ -189,6 +204,11 @@ worktree (`$TMPDIR/harnessbench/<run>/tree`) with an isolated `HOME` for the age
   renderers (`formatRun`, `formatComparison`, `formatRollup`, `formatBatch*`, `formatJudging`)
   are gone. Judge instructions now forbid asserting how unseen code behaves.
 
+- **Agent's tests (2026-09-25).** The tests row runs only the test files the agent added or
+  changed (`testFiles`, `{files}` / `{dirs}`, `HB_TEST_FILES`), with the four states above and a
+  configurable `testLabel`. This repo runs `npm run build && node --test` on the changed tests'
+  `dist/` twins.
+
 ## Deliberately not built
 
 Named so they are not re-proposed as ideas: baseline reuse (skipping a `previous` run whose
@@ -200,7 +220,8 @@ classification in telemetry, credential encryption or `.env.ci` variants.
 
 0. A real batch (`npx . run --judge --keep`) on this repo, three fixtures; read the roll-up and
    check the wall clock and the progress lines are legible with six sides interleaved.
-1. Test `init --dry-run` on a real repo with a real `CLAUDE.md`; check the harness list,
+1. `init` detects `testFiles` and the placeholder form of the test command (next task).
+   Test `init --dry-run` on a real repo with a real `CLAUDE.md`; check the harness list,
    test command and base branch are right. Fix what's wrong.
 2. Real-agent smoke of `run`; fix what the real stream shows that the recording did not. Then
    `judge` on that pair with a real model: read `prompt.txt` and the verdicts by hand; revise

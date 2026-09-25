@@ -37,7 +37,24 @@ export type CommandResult = {
   timedOut: boolean;
 };
 
-export type TestResult = CommandResult;
+/**
+ * What the tests row says about one side: `passed` / `failed` when a command ran, `none written`
+ * when the command runs only the agent's test files and it wrote none, `not run` when the
+ * environment runs no tests at all (`testCommand` is empty).
+ */
+export type TestState = "passed" | "failed" | "none written" | "not run";
+
+export type TestResult = {
+  state: TestState;
+  /** The command as actually run, placeholders expanded; null when nothing ran. */
+  command: string | null;
+  /** The agent's changed test files, sorted; what `{files}` and `HB_TEST_FILES` carry. */
+  files: string[];
+  /** Null when nothing ran, or the command was killed, including on timeout. */
+  exitCode: number | null;
+  durationMs: number;
+  timedOut: boolean;
+};
 
 export type RunRecord = {
   schema: typeof RUN_RECORD_SCHEMA;
@@ -76,8 +93,7 @@ export type RunRecord = {
    */
   telemetry?: Telemetry;
   diff: { files: number; added: number; removed: number };
-  /** Null when no test command is configured. */
-  tests: TestResult | null;
+  tests: TestResult;
   finalMessage: string;
 };
 
@@ -115,7 +131,28 @@ export function readRunRecord(dir: string): RunRecord {
         `it was written by another version of harnessbench`,
     );
   }
-  return parsed as RunRecord;
+  const record = parsed as RunRecord;
+  return { ...record, tests: upgradeTests((parsed as { tests?: unknown }).tests) };
+}
+
+/**
+ * Records written before test selection hold the bare command result, or null for no test
+ * command; both still read, as the shape they would have today.
+ */
+function upgradeTests(tests: unknown): TestResult {
+  if (tests === null || tests === undefined) {
+    return { state: "not run", command: null, files: [], exitCode: null, durationMs: 0, timedOut: false };
+  }
+  const found = tests as Partial<TestResult> & CommandResult;
+  if (found.state !== undefined) return found as TestResult;
+  return {
+    state: found.exitCode === 0 && !found.timedOut ? "passed" : "failed",
+    command: found.command,
+    files: [],
+    exitCode: found.exitCode,
+    durationMs: found.durationMs,
+    timedOut: found.timedOut,
+  };
 }
 
 /**

@@ -99,7 +99,7 @@ function record(
     toolCalls: { Read: 20, Edit: 10 },
     toolFailures: 2,
     diff: { files: 5, added: 200, removed: 20 },
-    tests: { command: "npm test", exitCode: 0, durationMs: 12000, timedOut: false },
+    tests: { state: "passed", command: "npm test", files: [], exitCode: 0, durationMs: 12000, timedOut: false },
     finalMessage: "done",
     ...patch,
   };

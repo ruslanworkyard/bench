@@ -32,7 +32,7 @@ function record(fixture: string, environment: Environment, patch: Partial<RunRec
     toolCalls: { Read: 20, Edit: 10 },
     toolFailures: 2,
     diff: { files: 5, added: 200, removed: 20 },
-    tests: { command: "npm test", exitCode: 0, durationMs: 12000, timedOut: false },
+    tests: { state: "passed", command: "npm test", files: [], exitCode: 0, durationMs: 12000, timedOut: false },
     finalMessage: `${environment} done`,
     ...patch,
   };
@@ -104,7 +104,7 @@ test("buildReport assembles the batch: shas, agent, judge, roll-up, and per fixt
     tokens: { input: 1000, output: 20000, cacheRead: 400000, cacheWrite: 10000 },
     costUsd: 0.4,
     setup: null,
-    tests: { command: "npm test", exitCode: 0, durationMs: 12000, timedOut: false },
+    tests: { state: "passed", command: "npm test", files: [], exitCode: 0, durationMs: 12000, timedOut: false },
     diff: { files: 5, added: 200, removed: 20 },
     finalMessage: "previous done",
     runDir: `.harnessbench/runs/${STAMP}-ttl-cache-previous`,

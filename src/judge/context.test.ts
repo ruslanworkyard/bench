@@ -32,7 +32,7 @@ function record(environment: Environment, patch: Partial<RunRecord> = {}): RunRe
     toolCalls: { Read: 1 },
     toolFailures: 0,
     diff: { files: 1, added: 1, removed: 0 },
-    tests: { command: "npm test", exitCode: 0, durationMs: 12000, timedOut: false },
+    tests: { state: "passed", command: "npm test", files: [], exitCode: 0, durationMs: 12000, timedOut: false },
     finalMessage: `Done: ${environment === "previous" ? "cache added" : "cache added, with tests"}`,
     ...patch,
   };
@@ -132,15 +132,10 @@ test("only the items a judge asked for are rendered", () => {
 
 test("tests render as a fact, never the log; an empty diff and message say so", () => {
   assert.equal(renderItem("tests", side("previous")), "passed");
-  assert.equal(renderItem("tests", side("previous", {}, record("previous", { tests: null }))), "not configured");
-  assert.equal(
-    renderItem("tests", side("previous", {}, record("previous", { tests: { command: "npm test", exitCode: 1, durationMs: 1, timedOut: false } }))),
-    "failed",
-  );
-  assert.equal(
-    renderItem("tests", side("previous", {}, record("previous", { tests: { command: "npm test", exitCode: null, durationMs: 1, timedOut: true } }))),
-    "failed",
-  );
+  for (const state of ["passed", "failed", "none written", "not run"] as const) {
+    const tests = { state, command: null, files: [], exitCode: null, durationMs: 1, timedOut: false };
+    assert.equal(renderItem("tests", side("previous", {}, record("previous", { tests }))), state);
+  }
   assert.equal(renderItem("diff", side("previous", { diff: "" })), "(no changes)");
   assert.equal(renderItem("finalMessage", side("previous", {}, record("previous", { finalMessage: "" }))), "(none)");
 });
