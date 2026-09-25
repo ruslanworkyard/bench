@@ -54,6 +54,7 @@ test("a minimal judge.json validates with prompt.md and no overrides", () => {
     provider: null,
     model: null,
     apiKeyEnv: null,
+    providerOptions: null,
   });
 });
 
@@ -67,6 +68,9 @@ test("the override fields and a custom prompt path round-trip", () => {
   assert.equal(meta.model, "gpt-5");
   assert.equal(meta.apiKeyEnv, "MY_KEY");
   assert.equal(validateJudge({ ...VALID, provider: null, model: null }, "j").provider, null);
+  const options = { provider: { sort: "throughput" }, reasoning: { effort: "low" } };
+  assert.deepEqual(validateJudge({ ...VALID, providerOptions: options }, "j").providerOptions, options);
+  assert.equal(validateJudge({ ...VALID, providerOptions: null }, "j").providerOptions, null);
 });
 
 test("every validation error names the file and what is wrong", () => {
@@ -77,6 +81,7 @@ test("every validation error names the file and what is wrong", () => {
   cliError(() => validateJudge({ id: "a", title: "b" }, where), /"description" must be a non-empty string, found nothing/);
   cliError(() => validateJudge({ ...VALID, rubric: "x" }, where), /unknown key "rubric"/);
   cliError(() => validateJudge({ ...VALID, prompt: "" }, where), /"prompt" must be a non-empty string/);
+  cliError(() => validateJudge({ ...VALID, providerOptions: [] }, where), /"providerOptions" must be an object or null, found an array/);
   cliError(() => validateJudge({ ...VALID, context: [] }, where), /"context" must be a non-empty array of prompt, diff, tests, finalMessage, toolLog, transcript/);
   cliError(() => validateJudge({ ...VALID, context: "diff" }, where), /"context" must be a non-empty array/);
   cliError(() => validateJudge({ ...VALID, context: ["diff", "testLog"] }, where), /"context" entry "testLog" is not one of prompt, diff, tests, finalMessage, toolLog, transcript/);

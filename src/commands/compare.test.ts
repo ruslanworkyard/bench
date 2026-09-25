@@ -45,7 +45,10 @@ function verdict(root: string, id: string, patch: Partial<VerdictRecord> = {}): 
     reason: `${id} reason`,
     provider: "anthropic",
     model: "claude-sonnet-4-5",
-    usage: { input: 100, output: 20 },
+    usage: { input: 100, output: 20, reasoning: null },
+    upstream: null,
+    durationMs: 12000,
+    attempts: 1,
     rubricHash: judge?.hash ?? "no-such-judge",
     ...patch,
   };
@@ -407,7 +410,7 @@ test("batch --json is the report, exactly as report.json holds it; --markdown an
   assert.match(markdown, /^\| Turns \| announcements, ttl-cache \|  \|  \|  \|$/m);
   assert.match(markdown, /^\| Code quality \| ttl-cache \|  \|  \| announcements \|$/m);
   assert.match(markdown, /<details><summary>announcements: code quality not judged<\/summary>\n\n### harnessbench: `announcements`/);
-  assert.match(markdown, /<details><summary>ttl-cache: code quality candidate<\/summary>\n\n### harnessbench: `ttl-cache`[\s\S]*\| Code quality \|  \|  \| candidate preferred \| improved \| B is tidier\. \|\n/);
+  assert.match(markdown, /<details><summary>ttl-cache: code quality candidate<\/summary>\n\n### harnessbench: `ttl-cache`[\s\S]*\| Code quality \|  \|  \| candidate preferred \| improved \| B is tidier\. \(judged in 12s\) \|\n/);
   assert.match(markdown, /\*\*candidate\*\* final message:\n\n> done\n[\s\S]*<\/details>\n$/);
 });
 
@@ -518,7 +521,7 @@ test("compare finds the pair's judge.json by run ids, not by the directory stamp
 
   const rows = parsed.rows.filter((row) => row.id.startsWith("judge."));
   assert.deepEqual(rows, [
-    { id: "judge.code-quality", label: "Code quality", previous: "", candidate: "", delta: "candidate preferred", classification: "improved", note: "ours" },
+    { id: "judge.code-quality", label: "Code quality", previous: "", candidate: "", delta: "candidate preferred", classification: "improved", note: "ours", durationMs: 12000 },
   ]);
   assert.deepEqual(parsed.judged, { model: "claude-sonnet-4-5", provider: "anthropic" });
 });
@@ -541,10 +544,10 @@ test("the table carries the judge rows: fresh, stale, not judged and no longer c
 
   const markdown = ok(root, "--markdown", previous, candidate).stdout;
   assert.match(markdown, /^Judged by anthropic claude-sonnet-4-5\.$/m);
-  assert.match(markdown, /^\| Code quality \|  \|  \| candidate preferred \| improved \| B keeps the error type\. \|$/m);
+  assert.match(markdown, /^\| Code quality \|  \|  \| candidate preferred \| improved \| B keeps the error type\. \(judged in 12s\) \|$/m);
   assert.match(markdown, /^\| Engineering practices \|  \|  \|  \| n\/a \| not judged; run harnessbench judge --fixture ttl-cache \|$/m);
-  assert.match(markdown, /^\| Test quality \|  \|  \| tie \| unchanged \| Both cover expiry\. — rubric changed since this verdict; run harnessbench judge --fixture ttl-cache \|$/m);
-  assert.match(markdown, /^\| Vibes \|  \|  \| previous preferred \| regressed \| A felt better\. — no longer in config\.judges \|$/m);
+  assert.match(markdown, /^\| Test quality \|  \|  \| tie \| unchanged \| Both cover expiry\. — rubric changed since this verdict; run harnessbench judge --fixture ttl-cache \(judged in 12s\) \|$/m);
+  assert.match(markdown, /^\| Vibes \|  \|  \| previous preferred \| regressed \| A felt better\. — no longer in config\.judges \(judged in 12s\) \|$/m);
 });
 
 test("with judges configured and no judge.json the rows say not judged; with none configured there are no rows", () => {

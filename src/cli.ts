@@ -4,16 +4,17 @@ import { writeSync } from "node:fs";
 import { compare, compareBatch } from "./commands/compare.js";
 import { init } from "./commands/init.js";
 import { judge, judgeBatch } from "./commands/judge.js";
-import { run } from "./commands/run.js";
+import { replay } from "./commands/replay.js";
+import { RUN_EXIT_CODES, run } from "./commands/run.js";
 import { loadEnvFile } from "./env.js";
 import { CliError } from "./errors.js";
 import { requireGit, requireRepo } from "./preflight.js";
 import { abortAll, liveWorkspaces } from "./workspace.js";
 
-const VALUE_FLAGS = new Set(["base", "test", "setup", "agent", "max-turns", "model", "fixture", "stamp", "concurrency", "tag", "test-files"]);
+const VALUE_FLAGS = new Set(["base", "test", "setup", "agent", "max-turns", "model", "fixture", "stamp", "concurrency", "tag", "test-files", "speed"]);
 /** Value flags that may be given more than once; the values are collected in order. */
 const REPEATABLE_FLAGS = new Set(["tag", "test-files"]);
-const BOOLEAN_FLAGS = new Set(["dry-run", "json", "keep", "markdown", "detail", "judge", "all", "help"]);
+const BOOLEAN_FLAGS = new Set(["dry-run", "json", "keep", "markdown", "detail", "judge", "all", "plain", "help"]);
 
 const HELP = `harnessbench - Regression tests for your CLAUDE.md.
 
@@ -22,6 +23,7 @@ Usage:
   harnessbench run [<fixture-id>...] [--tag <tag>]... [options]
   harnessbench compare [<previous-run-id> <candidate-run-id> | --fixture <id> | --stamp <s>] [options]
   harnessbench judge [<previous-run-id> <candidate-run-id> | --fixture <id> | --stamp <s>] [options]
+  harnessbench replay [<stamp>] [--speed <n>] [--plain]
 
 run drives a set of fixtures on HEAD's code, every side of every fixture at once under one
 stamp: with the harness as committed at the merge base with the base branch (previous), and
@@ -41,6 +43,10 @@ for each fixture as soon as its two sides are in. judge is incremental: a verdic
 since is kept, the rest are judged; --all judges every configured judge again. Over a
 batch, pairs are judged concurrently; a pair with a missing side is listed as skipped.
 
+Every run records its events (and judge appends its own) to .harnessbench/runs/<stamp>/events.jsonl.
+replay plays them back, the latest batch or the one named, with their original spacing divided
+by --speed, then prints the batch's report as run did.
+
 Options:
   --base <branch>   Base branch to compare against (overrides config/detection)
   --test <command>  Test command (init only; overrides detection)
@@ -58,7 +64,9 @@ Options:
   --all             Judge every configured judge, not only those without a fresh verdict (judge only)
   --fixture <id>    Use the latest run pair of this fixture (compare and judge)
   --stamp <s>       Use the batch with this stamp, YYYYMMDD-HHMMSS (compare and judge)
-  --detail          Print the full markdown report instead of the summary (run, compare, judge)
+  --speed <n>       Replay this many times faster; 0 is instant; default 10 (replay only)
+  --plain           Replay as plain progress lines, the only renderer for now (replay only)
+  --detail          Print the full markdown report instead of the summary (run, compare, judge, replay)
   --markdown        The same as --detail (compare only)
   --dry-run         Report what init would do, without writing anything
   --json            Print the summary as one JSON document; for run, compare and judge, the
@@ -126,6 +134,16 @@ function values(flags: Flags, name: string): string[] {
   return Array.isArray(flag) ? flag : [flag];
 }
 
+function nonNegativeNumber(flags: Flags, name: string): number | undefined {
+  const raw = value(flags, name);
+  if (raw === undefined) return undefined;
+  const parsed = Number(raw);
+  if (raw.trim() === "" || !Number.isFinite(parsed) || parsed < 0) {
+    throw new CliError(`option "--${name}" needs a number, 0 or more, got "${raw}"`, 2);
+  }
+  return parsed;
+}
+
 function positiveInteger(flags: Flags, name: string): number | undefined {
   const raw = value(flags, name);
   if (raw === undefined) return undefined;
@@ -144,9 +162,6 @@ function loadCredentials(): void {
   requireGit();
   loadEnvFile(requireRepo(process.cwd()));
 }
-
-/** What the shell learns from a run: the agent's outcome, never the test suite's. */
-const RUN_EXIT_CODES = { completed: 0, timeout: 2, error: 3, max_turns: 4 } as const;
 
 /** The conventional exit code for a process ended by SIGINT (128 + 2). */
 const INTERRUPTED_EXIT_CODE = 130;
@@ -243,6 +258,19 @@ async function main(argv: string[]): Promise<number> {
     const markdown = flags["markdown"] === true;
     if (pair) compare({ ...addressing, ...output, markdown });
     else compareBatch({ cwd: process.cwd(), stamp, ...output, markdown });
+    return 0;
+  }
+  if (command === "replay") {
+    const stamps = positional.slice(1);
+    if (stamps.length > 1) throw new CliError(`replay takes one stamp or none\n\n${HELP}`, 2);
+    await replay({
+      cwd: process.cwd(),
+      stamp: stamps[0],
+      speed: nonNegativeNumber(flags, "speed") ?? 10,
+      plain: flags["plain"] === true,
+      json: flags["json"] === true,
+      detail,
+    });
     return 0;
   }
   throw new CliError(`unknown command "${command}"\n\n${HELP}`, 2);

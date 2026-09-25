@@ -5,6 +5,7 @@ import type { TranscriptEvent } from "../agents/types.js";
 import { compare } from "../compare.js";
 import { RUNS_DIR, type Config } from "../config.js";
 import { CliError } from "../errors.js";
+import { EventBus, emitter, recorder, type Emit } from "../events.js";
 import {
   MAPPING,
   assembleContext,
@@ -13,8 +14,8 @@ import {
   type PairMaterial,
   type SideMaterial,
 } from "../judge/context.js";
-import { VerdictError, modelJudge, translate, type Judge } from "../judge/judge.js";
-import { judgeModel } from "../judge/provider.js";
+import { VerdictError, modelJudge, translate, type Judge, type Usage } from "../judge/judge.js";
+import { judgeModel, judgeProviderOptions } from "../judge/provider.js";
 import { requireJudge, type ContextItem, type LoadedJudge } from "../judges.js";
 import {
   requireConfig,
@@ -25,7 +26,8 @@ import {
   requireRepo,
   type ResolvedJudge,
 } from "../preflight.js";
-import { RUN_ID, runStamp, type Environment, type RunRecord } from "../run-record.js";
+import { plainRenderer } from "../render/plain.js";
+import { EVENTS_FILE, RUN_ID, reportDir, runStamp, type Environment, type RunRecord } from "../run-record.js";
 import {
   batchReport,
   compareBatchRecords,
@@ -43,7 +45,7 @@ import {
 } from "./compare.js";
 
 /**
- * Pairwise verdicts on one previous/candidate pair: every configured judge, in order, each
+ * Pairwise verdicts on one previous/candidate pair: every configured judge at once, each
  * shown the two sides as A and B. Refuses before any model call when the pair is not judgeable.
  * Judging is incremental: a verdict whose rubric has not changed since is kept, not re-bought.
  */
@@ -59,7 +61,13 @@ export type VerdictRecord = {
   reason: string;
   provider: string;
   model: string;
-  usage: { input: number; output: number };
+  /** Who served the call behind a router (OpenRouter's `provider`); null when not reported. */
+  upstream: string | null;
+  usage: Usage;
+  /** Wall clock over every attempt. Absent in files written before it was recorded. */
+  durationMs: number;
+  /** Model calls made: 1, or more after a timeout or a malformed reply. */
+  attempts: number;
   /** `LoadedJudge.hash` at the time; a verdict without one (an older file) is stale. */
   rubricHash: string;
 };
@@ -90,14 +98,25 @@ export type JudgePairResult = { record: JudgeRecord; judged: string[]; kept: str
 /** How a judge is built from its resolved target. Tests hand in one backed by a mock model. */
 export type JudgeDeps = { judgeFor: (target: ResolvedJudge) => Judge };
 
-export const defaultDeps: JudgeDeps = { judgeFor: (target) => modelJudge(judgeModel(target)) };
+export const defaultDeps: JudgeDeps = {
+  judgeFor: (target) =>
+    modelJudge(judgeModel(target), {
+      providerOptions: judgeProviderOptions(target),
+      timeoutMs: target.timeoutSeconds * 1000,
+    }),
+};
 
 export async function judge(options: JudgeOptions, deps: JudgeDeps = defaultDeps): Promise<JudgeRecord> {
   requireGit();
   const root = requireRepo(options.cwd);
   const config = requireConfig(root);
+  const invokedAt = Date.now();
   const [previous, candidate] = loadPair(root, "judge", options);
-  const result = await judgePair(root, config, previous, candidate, deps, options.all);
+  // A pair of one batch records into that batch's events; a pair across batches has none.
+  const stamp = RUN_ID.exec(previous.runId)?.[1];
+  const sameBatch = stamp !== undefined && stamp === RUN_ID.exec(candidate.runId)?.[1];
+  const emit = judgeEvents(root, invokedAt, previous.fixture.length, sameBatch ? stamp : null);
+  const result = await judgePair(root, config, previous, candidate, deps, options.all, emit);
   const comparison = compare(previous, candidate, loadJudgement(root, config, previous, candidate), config.testLabel);
   const path = rewriteBatchReport(root, config, previous, candidate, options.stepSummary);
   printReport(pairReport(previous, candidate, comparison), options, path);
@@ -125,13 +144,16 @@ export async function judgeBatch(options: JudgeBatchOptions, deps: JudgeDeps = d
   requireGit();
   const root = requireRepo(options.cwd);
   const config = requireConfig(root);
+  const invokedAt = Date.now();
   const batch = loadBatch(root, options.stamp);
+  const fixtureWidth = Math.max(...batch.pairs.map((pair) => pair.fixture.length));
+  const emit = judgeEvents(root, invokedAt, fixtureWidth, batch.stamp);
 
   const settled = await Promise.allSettled(
     batch.pairs.map(async (pair): Promise<JudgePairResult | null> => {
       if (pair.previous === null || pair.candidate === null) return null;
       const [previous, candidate] = orderPair([pair.previous, pair.candidate]);
-      return judgePair(root, config, previous, candidate, deps, options.all);
+      return judgePair(root, config, previous, candidate, deps, options.all, emit);
     }),
   );
   const unexpected = settled.find((each) => each.status === "rejected" && !(each.reason instanceof CliError));
@@ -165,8 +187,9 @@ export async function judgeBatch(options: JudgeBatchOptions, deps: JudgeDeps = d
  * judge.json, if any, is merged into: a configured judge whose verdict carries the current
  * rubric hash is kept without a model call (unless `all`), the others are judged, and verdicts
  * for judges no longer configured ride along untouched, after the configured ones. The new
- * directory is assembled as `<dir>.tmp` and renamed over the old one only at the end, so a
- * failure mid-judge leaves the previous file intact.
+ * directory is assembled as `<dir>.tmp` and renamed over the old one once every call has
+ * settled. A judge that fails does not cost the others their verdicts: they are written, and
+ * then the failure is thrown as a CliError naming that judge. `emit` hears each call start and end.
  */
 export async function judgePair(
   root: string,
@@ -175,6 +198,7 @@ export async function judgePair(
   candidate: RunRecord,
   deps: JudgeDeps = defaultDeps,
   all = false,
+  emit?: Emit,
 ): Promise<JudgePairResult> {
   for (const side of [previous, candidate]) {
     if (side.outcome !== "completed") {
@@ -230,9 +254,69 @@ export async function judgePair(
     if (existsSync(from)) cpSync(from, join(tmp, id), { recursive: true });
   };
 
+  // Every call at once: a pair takes as long as its slowest judge, not the sum of them.
+  const calls = await Promise.allSettled(
+    todo.map(async (each): Promise<VerdictRecord> => {
+      const target = targets.get(each.meta.id) as ResolvedJudge;
+      const judgeDir = join(tmp, each.meta.id);
+      mkdirSync(judgeDir);
+      const context = assembleContext(each.meta.context, pair as PairMaterial);
+      const call = { fixture: previous.fixture, judge: each.meta.id };
+      emit?.({ type: "judge.start", ...call });
+      const started = Date.now();
+      let response;
+      try {
+        response = await deps.judgeFor(target).judge({ id: each.meta.id, rubric: each.rubric, context });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        emit?.({ type: "judge.failed", ...call, message, durationMs: Date.now() - started });
+        if (error instanceof VerdictError) {
+          keepFiles(judgeDir, error.system, error.user, { text: error.text, usage: error.usage, attempts: error.attempts });
+          throw new CliError(`${error.message}; its reply is kept in ${RUNS_DIR}/${dirName}/${each.meta.id}/`, 1);
+        }
+        rmSync(judgeDir, { recursive: true, force: true });
+        throw error;
+      }
+      keepFiles(judgeDir, response.system, response.user, {
+        text: response.text,
+        usage: response.usage,
+        attempts: response.attempts,
+        durationMs: response.durationMs,
+        upstream: response.upstream,
+      });
+      const verdict: VerdictRecord = {
+        judge: each.meta.id,
+        title: each.meta.title,
+        preference: translate(response.verdict.preference),
+        reason: response.verdict.reason,
+        provider: target.provider,
+        model: target.model,
+        upstream: response.upstream,
+        usage: response.usage,
+        durationMs: response.durationMs,
+        attempts: response.attempts,
+        rubricHash: each.hash,
+      };
+      emit?.({
+        type: "judge.verdict",
+        ...call,
+        preference: verdict.preference,
+        durationMs: verdict.durationMs,
+        upstream: verdict.upstream,
+      });
+      return verdict;
+    }),
+  );
+  const unexpected = calls.find((each) => each.status === "rejected" && !(each.reason instanceof CliError));
+  if (unexpected !== undefined) throw (unexpected as PromiseRejectedResult).reason;
+  const outcomes = new Map(todo.map((each, i) => [each.meta.id, calls[i] as PromiseSettledResult<VerdictRecord>]));
+
+  // Config order, whatever order the calls finished in. A judge that failed has no verdict:
+  // the table shows it missing, and the others' verdicts are written all the same.
   const verdicts: VerdictRecord[] = [];
   const judged: string[] = [];
   const kept: string[] = [];
+  const failures: string[] = [];
   for (const each of judges) {
     const keep = fresh(each);
     if (keep !== undefined) {
@@ -241,35 +325,12 @@ export async function judgePair(
       carry(each.meta.id);
       continue;
     }
-    const target = targets.get(each.meta.id) as ResolvedJudge;
-    const judgeDir = join(tmp, each.meta.id);
-    mkdirSync(judgeDir);
-    const context = assembleContext(each.meta.context, pair as PairMaterial);
-    let response;
-    try {
-      response = await deps.judgeFor(target).judge({ id: each.meta.id, rubric: each.rubric, context });
-    } catch (error) {
-      if (error instanceof VerdictError) {
-        keepFiles(judgeDir, error.system, error.user, { text: error.text, usage: error.usage, attempts: 2 });
-        throw new CliError(`${error.message}; its reply is kept in ${RUNS_DIR}/${dirName}.tmp/${each.meta.id}/`, 1);
-      }
-      throw error;
+    const outcome = outcomes.get(each.meta.id) as PromiseSettledResult<VerdictRecord>;
+    if (outcome.status === "rejected") {
+      failures.push((outcome.reason as CliError).message);
+      continue;
     }
-    keepFiles(judgeDir, response.system, response.user, {
-      text: response.text,
-      usage: response.usage,
-      attempts: response.attempts,
-    });
-    verdicts.push({
-      judge: each.meta.id,
-      title: each.meta.title,
-      preference: translate(response.verdict.preference),
-      reason: response.verdict.reason,
-      provider: target.provider,
-      model: target.model,
-      usage: response.usage,
-      rubricHash: each.hash,
-    });
+    verdicts.push(outcome.value);
     judged.push(each.meta.id);
   }
   const configured = new Set(config.judges);
@@ -295,7 +356,23 @@ export async function judgePair(
   if (existsSync(dir)) renameSync(dir, old);
   renameSync(tmp, dir);
   rmSync(old, { recursive: true, force: true });
+  if (failures.length > 0) throw new CliError(failures.join("\n"), 1);
   return { record, judged, kept };
+}
+
+/**
+ * The judge command's events, on its own clock: progress lines on stderr, as `run` prints its
+ * sides', and, when the pairs are one batch's, appended to that batch's `events.jsonl` after a
+ * session line.
+ */
+function judgeEvents(root: string, invokedAt: number, fixtureWidth: number, stamp: string | null): Emit {
+  const bus = new EventBus();
+  bus.subscribe(plainRenderer({ fixtureWidth }));
+  if (stamp !== null) {
+    const session = { type: "session", command: "judge", startedAt: new Date(invokedAt).toISOString() } as const;
+    bus.subscribe(recorder(join(root, reportDir(stamp), EVENTS_FILE), session));
+  }
+  return emitter(bus, invokedAt);
 }
 
 /** What was sent and what came back, per judge, so a verdict can be checked by hand. */
@@ -303,7 +380,7 @@ function keepFiles(
   judgeDir: string,
   system: string,
   user: string,
-  response: { text: string; usage: { input: number; output: number }; attempts: number },
+  response: { text: string; usage: Usage; attempts: number; durationMs?: number; upstream?: string | null },
 ): void {
   writeFileSync(join(judgeDir, "prompt.txt"), `# System\n\n${system}\n\n# User\n\n${user}`, "utf8");
   writeFileSync(join(judgeDir, "response.json"), `${JSON.stringify(response, null, 2)}\n`, "utf8");

@@ -370,7 +370,10 @@ function verdict(patch: Partial<VerdictRecord> & { judge: string }): VerdictReco
     reason: "B's diff adds a typed error.",
     provider: "anthropic",
     model: "claude-sonnet-4-5",
-    usage: { input: 100, output: 20 },
+    usage: { input: 100, output: 20, reasoning: null },
+    upstream: null,
+    durationMs: 12000,
+    attempts: 1,
     rubricHash: `${patch.judge}-hash`,
     ...patch,
   };
@@ -412,9 +415,9 @@ test("a fresh verdict is a row with the verdict as delta and the reason as note"
   });
 
   assert.deepEqual(judgeRows(c.rows), [
-    { id: "judge.code-quality", label: "Title of code-quality", previous: "", candidate: "", delta: "candidate preferred", classification: "improved", note: "B keeps the error type." },
-    { id: "judge.practices", label: "Title of practices", previous: "", candidate: "", delta: "previous preferred", classification: "regressed", note: "A ran the suite once. B never did." },
-    { id: "judge.tests", label: "Title of tests", previous: "", candidate: "", delta: "tie", classification: "unchanged", note: "Both cover expiry." },
+    { id: "judge.code-quality", label: "Title of code-quality", previous: "", candidate: "", delta: "candidate preferred", classification: "improved", note: "B keeps the error type." , durationMs: 12000 },
+    { id: "judge.practices", label: "Title of practices", previous: "", candidate: "", delta: "previous preferred", classification: "regressed", note: "A ran the suite once. B never did." , durationMs: 12000 },
+    { id: "judge.tests", label: "Title of tests", previous: "", candidate: "", delta: "tie", classification: "unchanged", note: "Both cover expiry." , durationMs: 12000 },
   ]);
   // Judge rows come after every mechanical row.
   assert.equal(c.rows.findIndex((r) => r.id.startsWith("judge.")), c.rows.length - 3);
@@ -438,6 +441,7 @@ test("a stale verdict (hash differs or missing) keeps the verdict and says the r
       delta: "candidate preferred",
       classification: "improved",
       note: "B keeps the error type. — rubric changed since this verdict; run harnessbench judge --fixture ttl-cache",
+      durationMs: 12000,
     },
     {
       id: "judge.tests",
@@ -447,6 +451,7 @@ test("a stale verdict (hash differs or missing) keeps the verdict and says the r
       delta: "tie",
       classification: "unchanged",
       note: "Both cover expiry. — rubric changed since this verdict; run harnessbench judge --fixture ttl-cache",
+      durationMs: 12000,
     },
   ]);
 });

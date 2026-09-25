@@ -33,9 +33,19 @@ export function cutOffMessage(turns: number): string {
   return `cut off by the turn limit after ${turns} turns`;
 }
 
+/**
+ * What the parser says as lines arrive: a `turn` when an assistant message completes (usage
+ * summed over the messages so far, cost as the stream last reported it), a `tool` per call, and
+ * a `tool` with `failed` for a call whose result was an error.
+ */
+export type StreamEvent =
+  | { type: "turn"; turn: number; tokens: Usage; costUsd: number | null }
+  | { type: "tool"; thread: string; kind: ToolKind; label: string; failed: boolean };
+
 export type StreamOptions = {
   /** The workspace tree; a tool's `file_path` under it is recorded relative to it. */
   tree?: string | undefined;
+  onEvent?: ((event: StreamEvent) => void) | undefined;
 };
 
 type Json = Record<string, unknown>;
@@ -126,6 +136,22 @@ function toolPath(kind: ToolKind, input: unknown, tree: string | undefined): str
   return rel === "" || rel.startsWith("..") || isAbsolute(rel) ? path : rel;
 }
 
+/** A command that starts by changing into the tree, once the tree is `.`: the `cd` says nothing. */
+const LEADING_CD = /^cd (?:\.|"\."|'\.') && /;
+
+/**
+ * A call as the judge's tool log renders it: its kind, then its file, else its command's first
+ * line with the tree as `.`, else its tool's name. A sub-agent is `spawn <tool>`.
+ */
+function toolLabel(kind: ToolKind, tool: string, path: string | null, input: unknown, tree: string | undefined): string {
+  if (kind === "spawn") return `spawn ${tool}`;
+  if (path !== null) return `${kind} ${path}`;
+  const command = isObject(input) ? str(input["command"]) : null;
+  if (command === null || command === "") return `${kind} ${tool}`;
+  const local = (tree === undefined ? command : command.split(tree).join(".")).replace(LEADING_CD, "");
+  return `${kind} ${local.split("\n")[0] ?? ""}`;
+}
+
 /** A sub-agent's events carry the id of the call that spawned it; the main thread's do not. */
 function thread(event: Json): string {
   return str(event["parent_tool_use_id"]) ?? MAIN_THREAD;
@@ -157,8 +183,18 @@ export class StreamParser {
   private assistantMessages = 0;
   private sawResult = false;
 
+  private readonly onEvent: ((event: StreamEvent) => void) | undefined;
+  /** Per thread, the assistant message still arriving: its turn and its latest usage. */
+  private readonly open = new Map<string, { turn: number; usage: Usage | null }>();
+  private readonly running: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  private completedTurns = 0;
+  private latestCost: number | null = null;
+  /** Tool call id → what a failed result reports it as. */
+  private readonly calls = new Map<string, { thread: string; kind: ToolKind; label: string }>();
+
   constructor(options: StreamOptions = {}) {
     this.tree = options.tree;
+    this.onEvent = options.onEvent;
   }
 
   /** One line of the stream; `at` is milliseconds since the agent started, per the caller. */
@@ -192,8 +228,28 @@ export class StreamParser {
 
   /** The parsed stream. Safe to call at any point; the adapter calls it once, at the end. */
   finish(): ParsedStream {
+    this.closeAll();
     if (!this.sawResult) this.parsed.turns = this.assistantMessages;
     return this.parsed;
+  }
+
+  /** The thread's open assistant message is complete: add its usage and say so. */
+  private close(thread: string): void {
+    const open = this.open.get(thread);
+    if (open === undefined) return;
+    this.open.delete(thread);
+    if (open.usage !== null) {
+      this.running.input += open.usage.input;
+      this.running.output += open.usage.output;
+      this.running.cacheRead += open.usage.cacheRead;
+      this.running.cacheWrite += open.usage.cacheWrite;
+    }
+    this.completedTurns++;
+    this.onEvent?.({ type: "turn", turn: this.completedTurns, tokens: { ...this.running }, costUsd: this.latestCost });
+  }
+
+  private closeAll(): void {
+    for (const thread of [...this.open.keys()]) this.close(thread);
   }
 
   /** The turn an assistant event belongs to: one per API message id, a new one when there is none. */
@@ -210,6 +266,10 @@ export class StreamParser {
     const own = message(event);
     const turn = this.turn(own);
     const base = { thread: thread(event), at };
+    // A new message on this thread completes the one before it; the same message keeps its latest usage.
+    const open = this.open.get(base.thread);
+    if (open !== undefined && open.turn !== turn) this.close(base.thread);
+    this.open.set(base.thread, { turn, usage: usage(own["usage"]) ?? (open?.turn === turn ? open.usage : null) });
     const texts: string[] = [];
     const calls: TranscriptEvent[] = [];
     for (const block of contentBlocks(event)) {
@@ -219,16 +279,13 @@ export class StreamParser {
       } else if (block["type"] === "tool_use") {
         const tool = str(block["name"]) ?? "unknown";
         const kind = toolKind(tool);
-        calls.push({
-          ...base,
-          type: "tool_call",
-          id: str(block["id"]) ?? "",
-          tool,
-          input: toolInput(block["input"]),
-          kind,
-          path: toolPath(kind, block["input"], this.tree),
-        });
+        const id = str(block["id"]) ?? "";
+        const path = toolPath(kind, block["input"], this.tree);
+        calls.push({ ...base, type: "tool_call", id, tool, input: toolInput(block["input"]), kind, path });
         this.parsed.toolCalls[tool] = (this.parsed.toolCalls[tool] ?? 0) + 1;
+        const label = toolLabel(kind, tool, path, block["input"], this.tree);
+        this.calls.set(id, { thread: base.thread, kind, label });
+        this.onEvent?.({ type: "tool", thread: base.thread, kind, label, failed: false });
       }
     }
     const text = texts.join("\n");
@@ -245,10 +302,17 @@ export class StreamParser {
   }
 
   private user(event: Json, at: number): void {
+    this.close(thread(event));
     for (const block of contentBlocks(event)) {
       if (block["type"] !== "tool_result") continue;
+      // A spawn's result means its sub-agent, whose thread is the call's id, has finished.
+      this.close(str(block["tool_use_id"]) ?? "");
       const isError = block["is_error"] === true;
-      if (isError) this.parsed.toolFailures++;
+      if (isError) {
+        this.parsed.toolFailures++;
+        const call = this.calls.get(str(block["tool_use_id"]) ?? "") ?? { thread: thread(event), kind: "other" as const, label: "other unknown" };
+        this.onEvent?.({ type: "tool", ...call, failed: true });
+      }
       this.parsed.transcript.push({
         thread: thread(event),
         at,
@@ -268,6 +332,8 @@ export class StreamParser {
     this.sawResult = true;
     this.parsed.tokens = usage(event["usage"]) ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     this.parsed.costUsd = num(event["total_cost_usd"]);
+    this.latestCost = this.parsed.costUsd ?? this.latestCost;
+    this.closeAll();
     this.parsed.durationMs = num(event["duration_ms"]);
     this.parsed.turns = num(event["num_turns"]) ?? this.assistantMessages;
     this.parsed.resultSubtype = str(event["subtype"]);

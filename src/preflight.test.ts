@@ -255,6 +255,7 @@ function judge(overrides: Partial<LoadedJudge["meta"]> = {}): LoadedJudge {
       provider: null,
       model: null,
       apiKeyEnv: null,
+      providerOptions: null,
       ...overrides,
     },
   };
@@ -269,6 +270,8 @@ test("requireJudgeModel resolves environment over judge.json over config, and th
     apiKeyEnv: "ANTHROPIC_API_KEY",
     baseUrl: "",
     structuredOutputs: true,
+    providerOptions: {},
+    timeoutSeconds: 180,
   });
 
   const overridden = judge({ provider: "openai", model: "gpt-5", apiKeyEnv: "TEAM_OPENAI_KEY" });
@@ -278,6 +281,8 @@ test("requireJudgeModel resolves environment over judge.json over config, and th
     apiKeyEnv: "TEAM_OPENAI_KEY",
     baseUrl: "",
     structuredOutputs: true,
+    providerOptions: {},
+    timeoutSeconds: 180,
   });
 
   const env = { HARNESSBENCH_JUDGE_PROVIDER: "google", HARNESSBENCH_JUDGE_MODEL: "gemini-3-pro" };

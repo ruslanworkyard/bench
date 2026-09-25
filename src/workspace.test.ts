@@ -16,6 +16,7 @@ import { basename, dirname, join } from "node:path";
 import { after, test } from "node:test";
 
 import { harnessSnapshot, type HarnessSnapshot } from "./detect/harness.js";
+import { selectTests } from "./test-selection.js";
 import { abortAll, createWorkspace, liveWorkspaces, withWorkspace, type Workspace } from "./workspace.js";
 
 const hosts: string[] = [];
@@ -88,12 +89,13 @@ function hostWithBranch(): { root: string; mergeBase: string } {
   return { root, mergeBase };
 }
 
-async function workspace(repoRoot: string, ref: string, depth?: number): Promise<Workspace> {
+async function workspace(repoRoot: string, ref: string, depth?: number, hidePaths?: string[]): Promise<Workspace> {
   const created = await createWorkspace({
     repoRoot,
     ref,
     runId: `test-${process.pid}-${runIds++}`,
     ...(depth === undefined ? {} : { depth }),
+    ...(hidePaths === undefined ? {} : { hidePaths }),
   });
   workspaces.push(created);
   return created;
@@ -230,6 +232,66 @@ test("diff covers tracked and untracked changes, but not .harnessbench", async (
   assert.match(diff, /^\+\+\+ b\/file\.txt$/m);
   assert.match(diff, /^\+\+\+ b\/added\.txt$/m);
   assert.doesNotMatch(diff, /harnessbench/);
+});
+
+/** A host whose committed tree carries the tool's own material next to the code. */
+function hostWithState(): string {
+  const root = host();
+  write(root, ".harnessbench/config.json", "{}\n");
+  write(root, ".harnessbench/fixtures/x/prompt.md", "Build the thing. This is the fixture's own task.\n");
+  write(root, "docs/tasks/one.md", "a task\n");
+  write(root, "docs/tasks/nested/two.md", "another\n");
+  write(root, "docs/guide.md", "kept\n");
+  write(root, "src/tasks.ts", "kept\n");
+  git(root, "add", "-A");
+  git(root, "commit", "--quiet", "-m", "state");
+  return root;
+}
+
+test("hide deletes every path matching hidePaths from the tree, and the diff is empty when the agent changes nothing", async () => {
+  const ws = await workspace(hostWithState(), "main", undefined, [".harnessbench", "docs/tasks"]);
+
+  const removed = await ws.hide();
+
+  assert.deepEqual(removed, [".harnessbench", "docs/tasks"]);
+  assert.equal(existsSync(join(ws.tree, ".harnessbench", "fixtures", "x", "prompt.md")), false);
+  assert.equal(existsSync(join(ws.tree, ".harnessbench")), false);
+  assert.equal(existsSync(join(ws.tree, "docs", "tasks")), false);
+  assert.equal(readFileSync(join(ws.tree, "docs", "guide.md"), "utf8"), "kept\n");
+  assert.equal(readFileSync(join(ws.tree, "src", "tasks.ts"), "utf8"), "kept\n");
+  assert.equal(await ws.diff(), "");
+  assert.deepEqual(await ws.changedFiles(), []);
+});
+
+test("hidden paths stay out of diff, --name-status and test selection, whatever the agent writes there", async () => {
+  const ws = await workspace(hostWithState(), "main", undefined, [".harnessbench", "docs/**/*.md"]);
+  await ws.hide();
+  assert.equal(existsSync(join(ws.tree, "docs", "guide.md")), false);
+  assert.equal(existsSync(join(ws.tree, "docs", "tasks", "nested", "two.md")), false);
+
+  write(ws.tree, ".harnessbench/fixtures/x/prompt.test.ts", "agent\n");
+  write(ws.tree, "docs/notes.md", "agent\n");
+  write(ws.tree, "src/tasks.test.ts", "agent\n");
+  const diff = await ws.diff();
+  const changed = await ws.changedFiles();
+
+  assert.deepEqual(changed, ["A\tsrc/tasks.test.ts"]);
+  assert.doesNotMatch(diff, /harnessbench|docs\//);
+  assert.deepEqual(selectTests(changed, ["**/*.test.ts", "**/*.md"]), ["src/tasks.test.ts"]);
+});
+
+test("with the default hidePaths nothing but .harnessbench goes, and with none nothing is deleted", async () => {
+  const root = hostWithState();
+  const byDefault = await workspace(root, "main", undefined, [".harnessbench"]);
+  assert.deepEqual(await byDefault.hide(), [".harnessbench"]);
+  assert.ok(existsSync(join(byDefault.tree, "docs", "tasks", "one.md")));
+
+  const none = await workspace(root, "main");
+  assert.deepEqual(await none.hide(), []);
+  assert.ok(existsSync(join(none.tree, ".harnessbench", "fixtures", "x", "prompt.md")));
+  // .harnessbench is ours: out of the diff even when it is not hidden.
+  write(none.tree, ".harnessbench/notes.md", "ours\n");
+  assert.equal(await none.diff(), "");
 });
 
 test("destroy removes the directory and is idempotent", async () => {

@@ -58,6 +58,8 @@ test("a config without a judge block loads with the judge defaults; a full block
     baseUrl: "",
     structuredOutputs: true,
     maxContextKb: 512,
+    providerOptions: {},
+    timeoutSeconds: 180,
   });
   assert.deepEqual(older.judges, ["code-quality", "engineering-practices", "test-quality"]);
 
@@ -68,6 +70,8 @@ test("a config without a judge block loads with the judge defaults; a full block
     baseUrl: "http://localhost:11434/v1",
     structuredOutputs: false,
     maxContextKb: 64,
+    providerOptions: { provider: { sort: "throughput" } },
+    timeoutSeconds: 60,
   };
   assert.deepEqual(validate({ judge, judges: ["code-quality"] }).judge, judge);
   assert.deepEqual(validate({ judge, judges: ["code-quality"] }).judges, ["code-quality"]);
@@ -78,6 +82,8 @@ test("the judge block's types are checked", () => {
   rejects({ judge: "anthropic" }, /"judge" must be an object, found a string/);
   rejects({ judge: { provider: "bedrock" } }, /"judge\.provider" must be one of anthropic, openai, google, openai-compatible, found "bedrock"/);
   rejects({ judge: { model: null } }, /"judge\.model" must be a string, found null/);
+  rejects({ judge: { providerOptions: "fast" } }, /"judge\.providerOptions" must be an object, found a string/);
+  rejects({ judge: { timeoutSeconds: 0 } }, /"judge\.timeoutSeconds" must be a positive number, found a number/);
   rejects({ judge: { maxContextKb: 0 } }, /"judge\.maxContextKb" must be a positive number/);
   rejects({ judge: { structuredOutputs: "yes" } }, /"judge\.structuredOutputs" must be true or false, found a string/);
   rejects({ judge: { baseURL: "x" } }, /unknown key "judge\.baseURL"/);
@@ -123,4 +129,16 @@ test("the rest of the config is checked too", () => {
   rejects({ baseBranch: "  " }, /"baseBranch" must not be empty/);
   rejects({ testCommand: 7 }, /"testCommand" must be a string/);
   rejects({ harness: { extraPaths: [7] } }, /"harness\.extraPaths" must be an array of strings/);
+});
+
+test("workspace.hidePaths defaults to .harnessbench, is replaced whole when set, and is checked", () => {
+  assert.deepEqual(validate({}).workspace, { hidePaths: [".harnessbench"] });
+  assert.deepEqual(validate({ workspace: { hidePaths: [".harnessbench", "docs/tasks/**"] } }).workspace.hidePaths, [
+    ".harnessbench",
+    "docs/tasks/**",
+  ]);
+  assert.deepEqual(validate({ workspace: {} }).workspace.hidePaths, [".harnessbench"]);
+  rejects({ workspace: [] }, /"workspace" must be an object, found an array/);
+  rejects({ workspace: { hidePaths: ".harnessbench" } }, /"workspace\.hidePaths" must be an array of strings/);
+  rejects({ workspace: { hide: [] } }, /unknown key "workspace\.hide"/);
 });

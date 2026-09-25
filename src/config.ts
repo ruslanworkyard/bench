@@ -19,6 +19,9 @@ export const DEFAULT_TIMEOUT_MINUTES = 20;
 export const DEFAULT_MAX_CONTEXT_KB = 512;
 export const DEFAULT_JUDGES = ["code-quality", "engineering-practices", "test-quality"];
 export const DEFAULT_TEST_LABEL = "Agent's tests";
+export const DEFAULT_JUDGE_TIMEOUT_SECONDS = 180;
+/** Deleted from every workspace tree before setup, so the agent cannot read its own task. */
+export const DEFAULT_HIDE_PATHS = [STATE_DIR];
 
 /** How one agent is driven. `name` picks the adapter; the rest is that adapter's business. */
 export type AgentConfig = {
@@ -54,6 +57,22 @@ export type JudgeConfig = {
   structuredOutputs: boolean;
   /** Per context item, per side: a bigger item is refused, never truncated. */
   maxContextKb: number;
+  /**
+   * Handed to the AI SDK as this provider's options, uninterpreted; for openai-compatible the
+   * SDK merges them into the request body (OpenRouter's `provider`, `reasoning`, ...). A
+   * judge.json's own replaces this one whole.
+   */
+  providerOptions: Record<string, unknown>;
+  /** One model call; a call over it is aborted and retried once. */
+  timeoutSeconds: number;
+};
+
+export type WorkspaceConfig = {
+  /**
+   * Globs (`*`, `?`, `**`), repo-relative: every path matching one, or inside a directory
+   * matching one, is deleted from the tree before setup and kept out of the diff.
+   */
+  hidePaths: string[];
 };
 
 export type Config = {
@@ -71,13 +90,24 @@ export type Config = {
   setupCommand: string;
   agent: AgentConfig;
   harness: { extraPaths: string[] };
+  workspace: WorkspaceConfig;
   judge: JudgeConfig;
   /** The judges `judge` runs, in this order, by id under `.harnessbench/judges/`. */
   judges: string[];
 };
 
-const TOP_KEYS = ["baseBranch", "testCommand", "testFiles", "testLabel", "setupCommand", "agent", "harness", "judge", "judges"] as const;
-const JUDGE_KEYS = ["provider", "model", "apiKeyEnv", "baseUrl", "structuredOutputs", "maxContextKb"] as const;
+const TOP_KEYS = ["baseBranch", "testCommand", "testFiles", "testLabel", "setupCommand", "agent", "harness", "workspace", "judge", "judges"] as const;
+const JUDGE_KEYS = [
+  "provider",
+  "model",
+  "apiKeyEnv",
+  "baseUrl",
+  "structuredOutputs",
+  "maxContextKb",
+  "providerOptions",
+  "timeoutSeconds",
+] as const;
+const WORKSPACE_KEYS = ["hidePaths"] as const;
 const AGENT_KEYS = [
   "name",
   "command",
@@ -106,6 +136,7 @@ export function defaults(): Config {
       env: [],
     },
     harness: { extraPaths: [] },
+    workspace: { hidePaths: [...DEFAULT_HIDE_PATHS] },
     judge: {
       provider: "anthropic",
       model: "",
@@ -113,6 +144,8 @@ export function defaults(): Config {
       baseUrl: "",
       structuredOutputs: true,
       maxContextKb: DEFAULT_MAX_CONTEXT_KB,
+      providerOptions: {},
+      timeoutSeconds: DEFAULT_JUDGE_TIMEOUT_SECONDS,
     },
     judges: [...DEFAULT_JUDGES],
   };
@@ -232,6 +265,11 @@ function validateJudge(value: unknown, judge: JudgeConfig): void {
     booleanField(raw, "structuredOutputs", '"judge.structuredOutputs"') ?? judge.structuredOutputs;
   judge.maxContextKb =
     positiveNumber(raw, "maxContextKb", '"judge.maxContextKb"') ?? judge.maxContextKb;
+  if (raw["providerOptions"] !== undefined) {
+    judge.providerOptions = { ...object(raw["providerOptions"], '"judge.providerOptions"') };
+  }
+  judge.timeoutSeconds =
+    positiveNumber(raw, "timeoutSeconds", '"judge.timeoutSeconds"') ?? judge.timeoutSeconds;
 }
 
 /** Checks a parsed config, filling in defaults for anything absent. */
@@ -259,6 +297,14 @@ export function validate(value: unknown): Config {
     checkKeys(harness, HARNESS_KEYS, "harness.");
     config.harness.extraPaths =
       stringArray(harness, "extraPaths", '"harness.extraPaths"') ?? config.harness.extraPaths;
+  }
+
+  // Absent in configs written before it existed; those take the default.
+  if (raw["workspace"] !== undefined) {
+    const workspace = object(raw["workspace"], '"workspace"');
+    checkKeys(workspace, WORKSPACE_KEYS, "workspace.");
+    config.workspace.hidePaths =
+      stringArray(workspace, "hidePaths", '"workspace.hidePaths"') ?? config.workspace.hidePaths;
   }
 
   // Both absent in configs written before judges existed; those load with the defaults.

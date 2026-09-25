@@ -6,6 +6,7 @@ import { compare, rollup, type Comparison, type JudgeInput, type Rollup } from "
 import { FIXTURES_DIR, RUNS_DIR, type AgentConfig } from "../config.js";
 import { dirtyHarnessFiles, harnessFiles, type HarnessSnapshot } from "../detect/harness.js";
 import { CliError } from "../errors.js";
+import { EventBus, emitter, recorder, type Emit, type SideRef } from "../events.js";
 import { selectFixtures } from "../fixtures.js";
 import {
   requireAgent,
@@ -20,10 +21,13 @@ import {
   requireRepo,
   type LoadedFixture,
 } from "../preflight.js";
-import { formatBatchPlan, formatDirtyHarness, formatProgress, formatRunsFinished, formatSameHarness } from "../print.js";
+import { formatDirtyHarness, formatProgressText } from "../print.js";
+import { plainRenderer } from "../render/plain.js";
 import { buildReport } from "../report.js";
 import {
   ENVIRONMENTS,
+  EVENTS_FILE,
+  reportDir,
   runStamp,
   writeRunRecord,
   type CommandResult,
@@ -72,13 +76,8 @@ export type RunBatchResult = { stamp: string; fixtures: RunFixtureResult[]; roll
 const COMMAND_TIMEOUT_MS = 10 * 60_000;
 const SETUP_LOG = "setup.log";
 
-/** What one side reports as it goes; `print.ts` turns each into a line on stderr. */
-export type ProgressEvent =
-  | { kind: "started" }
-  | { kind: "setup"; result: CommandResult }
-  | { kind: "agent"; outcome: RunOutcome; turns: number }
-  | { kind: "tests"; result: TestResult }
-  | { kind: "recorded"; runId: string };
+/** What the shell learns from a run: the agent's outcome, never the test suite's. */
+export const RUN_EXIT_CODES: Record<RunOutcome, number> = { completed: 0, timeout: 2, error: 3, max_turns: 4 };
 
 /** Everything one side of a run needs that the other side shares. */
 type Side = {
@@ -96,15 +95,18 @@ type Side = {
   setupCommand: string;
   testCommand: string;
   testFiles: string[];
+  hidePaths: string[];
   keep: boolean;
-  progress: (event: ProgressEvent) => void;
+  ref: SideRef;
+  emit: Emit;
 };
 
 /**
  * Runs a set of fixtures on the code at HEAD, every side of every fixture at once under one
  * stamp: with the harness at the merge base with the base branch (`previous`) and with the
  * harness at HEAD (`candidate`). Each side gets its own workspace and run directory; while
- * they run, one progress line per event goes to stderr. Each fixture is compared (and, with
+ * they run, every moment is an event on a bus, rendered as progress lines on stderr and
+ * recorded to the batch's `events.jsonl`. Each fixture is compared (and, with
  * --judge, judged) as soon as its two sides are in. At the end the batch's report is written
  * under `.harnessbench/runs/<stamp>/` and printed, fixtures in order.
  */
@@ -140,14 +142,21 @@ export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): P
   ];
   const dirty = dirtyHarnessFiles(root, onDisk);
   if (dirty.length > 0) console.error(formatDirtyHarness(dirty));
-  if (head.hash === previous.hash) console.error(formatSameHarness(mergeBase));
-
-  const ids = fixtures.map((each) => each.fixture.id);
-  console.error(formatBatchPlan(ids));
-  const fixtureWidth = Math.max(...ids.map((id) => id.length));
 
   // One timestamp for the whole batch, so every run id differs only in fixture and environment.
   const stamp = runStamp(new Date());
+  const bus = new EventBus();
+  bus.subscribe(plainRenderer());
+  bus.subscribe(recorder(join(root, reportDir(stamp), EVENTS_FILE)));
+  const emit = emitter(bus, invokedAt);
+  emit({
+    type: "batch.start",
+    stamp,
+    fixtures: fixtures.map((each) => each.fixture.id),
+    harness: { previous: previous.sha, candidate: head.sha },
+    sameHarness: head.hash === previous.hash,
+    agent: { name: adapter.name, model: agentConfig.model },
+  });
   const shared = {
     root,
     head,
@@ -158,6 +167,7 @@ export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): P
     setupCommand: config.setupCommand,
     testCommand: config.testCommand,
     testFiles: config.testFiles,
+    hidePaths: config.workspace.hidePaths,
     keep: options.keep,
   };
   const start = limiter(options.concurrency);
@@ -172,22 +182,21 @@ export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): P
   const outcomes = await Promise.all(
     fixtures.map(async (fixture): Promise<FixtureOutcome> => {
       const settled = await Promise.allSettled(
-        ENVIRONMENTS.map((environment) =>
-          start(() =>
+        ENVIRONMENTS.map((environment) => {
+          const ref: SideRef = { fixture: fixture.fixture.id, environment };
+          emit({ type: "side.phase", side: ref, phase: "queued" });
+          return start(() =>
             runSide({
               ...shared,
               fixture,
               runId: `${stamp}-${fixture.fixture.id}-${environment}`,
               environment,
               harness: environment === "previous" ? previous : head,
-              progress: (event) => {
-                process.stderr.write(
-                  `${formatProgress(Date.now() - invokedAt, fixture.fixture.id, fixtureWidth, environment, event)}\n`,
-                );
-              },
+              ref,
+              emit,
             }),
-          ),
-        ),
+          );
+        }),
       );
       const outcome = settledSides(fixture.fixture.id, settled);
       if (outcome.sides.length !== 2) return outcome;
@@ -198,7 +207,7 @@ export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): P
       const pair = outcome.sides.map((side) => side.record) as [RunRecord, RunRecord];
       if (options.judge) {
         try {
-          await judgePair(root, config, ...pair, deps, true);
+          await judgePair(root, config, ...pair, deps, true, emit);
         } catch (error) {
           if (!(error instanceof CliError)) throw error;
           console.error(`${fixture.fixture.id}: judging skipped: ${oneLine(error.message)}`);
@@ -228,9 +237,6 @@ export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): P
     })),
     rollup: rollup(outcomes.flatMap((each) => (each.comparison === null ? [] : [each.comparison]))),
   };
-  const runs = outcomes.reduce((sum, each) => sum + each.sides.length, 0);
-  console.error(formatRunsFinished(runs, Date.now() - invokedAt));
-
   const side = (sides: SideResult[], environment: Environment): RunRecord | null =>
     sides.find((each) => each.record.environment === environment)?.record ?? null;
   const report = buildReport(
@@ -252,6 +258,11 @@ export async function run(options: RunOptions, deps: JudgeDeps = defaultDeps): P
 
   // Every fixture had its say; now the failures, all of them, as the one error the shell sees.
   const failures = outcomes.flatMap((each) => each.failures);
+  const exitCode =
+    failures.length > 0
+      ? Math.max(...failures.map((each) => each.exitCode))
+      : Math.max(0, ...result.fixtures.flatMap((each) => each.records).map((record) => RUN_EXIT_CODES[record.outcome]));
+  emit({ type: "batch.done", durationMs: Date.now() - invokedAt, exitCode });
   if (failures.length > 0) {
     throw new CliError(failures.map((each) => each.message).join("\n"), Math.max(...failures.map((each) => each.exitCode)));
   }
@@ -326,24 +337,48 @@ function settledSides(fixture: string, settled: PromiseSettledResult<SideResult>
  * a configuration problem, not a result, so no run.json is written and no agent starts.
  */
 async function runSide(side: Side): Promise<SideResult> {
-  side.progress({ kind: "started" });
+  // A failure said with a reason (the setup line) is not said again without one.
+  let failed = false;
+  const phase = (to: "setup" | "agent" | "tests" | "done" | "failed", detail?: string): void => {
+    if (to === "failed") failed = true;
+    side.emit({ type: "side.phase", side: side.ref, phase: to, ...(detail === undefined ? {} : { detail }) });
+  };
+  try {
+    return await runSideSteps(side, phase);
+  } catch (error) {
+    if (!failed) phase("failed");
+    throw error;
+  }
+}
+
+async function runSideSteps(
+  side: Side,
+  phase: (to: "setup" | "agent" | "tests" | "done" | "failed", detail?: string) => void,
+): Promise<SideResult> {
+  phase("setup");
   const runDir = join(side.root, RUNS_DIR, side.runId);
   // Before the agent starts, so a crash mid-run still leaves the raw stream behind.
   mkdirSync(runDir, { recursive: true });
   const stderrPath = join(runDir, "agent.stderr.log");
 
   const record = await withWorkspace(
-    { repoRoot: side.root, ref: "HEAD", runId: side.runId, keep: side.keep },
+    { repoRoot: side.root, ref: "HEAD", runId: side.runId, keep: side.keep, hidePaths: side.hidePaths },
     async (ws) => {
       if (side.environment === "previous") {
         await ws.overlayHarness(side.root, side.head, side.harness);
         await ws.rebaseline();
       }
+      // The tool's own material, the fixture prompt among it, is not the agent's to read.
+      await ws.hide();
 
       // Before the agent's clock starts; the agent sees only the tree it leaves behind.
       const setup = side.setupCommand === "" ? null : await runLogged(ws, side.setupCommand, join(runDir, SETUP_LOG));
-      if (setup !== null) side.progress({ kind: "setup", result: setup });
-      if (setup !== null && setup.exitCode !== 0) throw setupFailed(side, setup, join(RUNS_DIR, side.runId, SETUP_LOG));
+      const setupLine = setup === null ? undefined : formatProgressText({ kind: "setup", result: setup });
+      if (setup !== null && setup.exitCode !== 0) {
+        phase("failed", setupLine);
+        throw setupFailed(side, setup, join(RUNS_DIR, side.runId, SETUP_LOG));
+      }
+      phase("agent", setupLine);
 
       const startedAt = new Date();
       const result = await side.adapter.run({
@@ -352,14 +387,14 @@ async function runSide(side: Side): Promise<SideResult> {
         config: side.agentConfig,
         rawOutputPath: join(runDir, "raw.jsonl"),
         stderrPath,
+        onEvent: (event) => side.emit({ ...event, side: side.ref }),
       });
-      side.progress({ kind: "agent", outcome: result.outcome, turns: result.turns });
+      phase("tests", formatProgressText({ kind: "agent", outcome: result.outcome, turns: result.turns }));
 
       const diff = await ws.diff();
       writeFileSync(join(runDir, "diff.patch"), diff, "utf8");
 
       const tests = await runTests(ws, side, join(runDir, "test.log"));
-      side.progress({ kind: "tests", result: tests });
 
       const transcript = result.transcript.map((event) => JSON.stringify(event));
       writeFileSync(
@@ -389,7 +424,8 @@ async function runSide(side: Side): Promise<SideResult> {
         finalMessage: result.finalMessage,
       };
       writeRunRecord(runDir, finished);
-      side.progress({ kind: "recorded", runId: side.runId });
+      phase("done", formatProgressText({ kind: "tests", result: tests }));
+      side.emit({ type: "side.done", side: side.ref, outcome: finished.outcome, runId: side.runId });
       return finished;
     },
   );

@@ -161,6 +161,8 @@ function upgradeTests(tests: unknown): TestResult {
  */
 export const REPORT_MARKDOWN = "report.md";
 export const REPORT_JSON = "report.json";
+/** The batch's event stream, one JSON line per event, beside its report; `replay` reads it. */
+export const EVENTS_FILE = "events.jsonl";
 
 /** `.harnessbench/runs/<stamp>`, relative to the repository root. */
 export function reportDir(stamp: string): string {

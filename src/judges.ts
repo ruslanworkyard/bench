@@ -30,6 +30,8 @@ export type JudgeMeta = {
   provider: JudgeProvider | null;
   model: string | null;
   apiKeyEnv: string | null;
+  /** Replaces `judge.providerOptions` of the config whole, no merge; null means not set. */
+  providerOptions: Record<string, unknown> | null;
 };
 
 /**
@@ -43,7 +45,7 @@ export function rubricHash(rubric: string, context: readonly ContextItem[]): str
   return createHash("sha256").update(rubric).update("\0").update(context.join(",")).digest("hex");
 }
 
-const KNOWN_KEYS = ["id", "title", "description", "prompt", "context", "provider", "model", "apiKeyEnv"];
+const KNOWN_KEYS = ["id", "title", "description", "prompt", "context", "provider", "model", "apiKeyEnv", "providerOptions"];
 
 function describe(value: unknown): string {
   if (value === null) return "null";
@@ -73,6 +75,7 @@ export function validateJudge(value: unknown, where: string): JudgeMeta {
     provider: null,
     model: null,
     apiKeyEnv: null,
+    providerOptions: null,
   };
   for (const key of ["id", "title", "description"] as const) {
     const field = raw[key];
@@ -111,6 +114,14 @@ export function validateJudge(value: unknown, where: string): JudgeMeta {
       fail(`"provider" must be one of ${JUDGE_PROVIDERS.join(", ")}, found "${String(field)}"`);
     }
     meta[key] = field as JudgeProvider;
+  }
+
+  const providerOptions = raw["providerOptions"];
+  if (providerOptions !== undefined && providerOptions !== null) {
+    if (typeof providerOptions !== "object" || Array.isArray(providerOptions)) {
+      fail(`"providerOptions" must be an object or null, found ${describe(providerOptions)}`);
+    }
+    meta.providerOptions = { ...(providerOptions as Record<string, unknown>) };
   }
 
   return meta;

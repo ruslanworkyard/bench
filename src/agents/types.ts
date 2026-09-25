@@ -16,7 +16,14 @@ export type AgentRequest = {
   rawOutputPath: string;
   /** And its stderr here, whole; the run keeps it to explain an agent that failed. */
   stderrPath: string;
+  /** Hears each turn and tool call as the agent makes it; the caller says whose side it is. */
+  onEvent?: ((event: AgentEvent) => void) | undefined;
 };
+
+/** A live moment of the agent's run: a completed turn, or a tool call (`failed` when its result was an error). */
+export type AgentEvent =
+  | { type: "side.turn"; turn: number; tokens: Usage; costUsd: number | null }
+  | { type: "side.tool"; thread: string; kind: ToolKind; label: string; failed: boolean };
 
 export type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number };
 

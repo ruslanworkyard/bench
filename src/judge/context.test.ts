@@ -215,3 +215,34 @@ test("the size check names every item over the limit, per side, and the shared p
   // Exactly at the limit is fine; the check is on what the judge would read, not the raw file.
   assert.deepEqual(oversized(["diff"], pair({ previous: side("previous", { diff: "y".repeat(2048) }) }), 2), []);
 });
+
+test("the workspace tree's absolute path is `.` in the tool log and transcript, and a leading cd into it is dropped", () => {
+  const runId = "20260919-031455-ttl-cache-candidate";
+  const tree = `/private/var/folders/xy/T/harnessbench/${runId}-a1B2c3/tree`;
+  const events: TranscriptEvent[] = [
+    { type: "tool_call", thread: "main", at: at(1), id: "t1", tool: "Bash", input: { command: `cd "${tree}" && npm test`, description: "Run tests" }, kind: "shell", path: null },
+    { type: "tool_result", thread: "main", at: at(2), id: "t1", isError: false, output: `FAIL ${tree}/src/cache.test.ts\n` },
+    { type: "tool_call", thread: "main", at: at(3), id: "t2", tool: "Bash", input: { command: `cd ${tree} && ls ${tree}/src` }, kind: "shell", path: null },
+    { type: "tool_call", thread: "main", at: at(4), id: "t3", tool: "Grep", input: { pattern: "ttl", path: `${tree}/src` }, kind: "search", path: null },
+    { type: "assistant", thread: "main", at: at(5), turn: 1, text: `Edited ${tree}/src/cache.ts.`, model: "claude-opus-5", usage: null },
+  ];
+  const candidate = side("candidate", { transcript: events });
+
+  const log = renderItem("toolLog", candidate);
+  assert.equal(log, "shell npm test\nshell ls ./src\nsearch Grep");
+
+  const text = renderItem("transcript", candidate);
+  assert.match(text, /^\[main\] tool call Bash\n {2}command: npm test\n/);
+  assert.match(text, /FAIL \.\/src\/cache\.test\.ts/);
+  assert.match(text, /command: ls \.\/src/);
+  assert.match(text, /path: \.\/src/);
+  assert.match(text, /Edited \.\/src\/cache\.ts\./);
+  assert.doesNotMatch(text, /harnessbench|\/private|cd /);
+
+  // Another run's tree is not this one's: only the side's own workspace is rewritten.
+  const other = `/tmp/harnessbench/20260919-031455-ttl-cache-previous-zzzzzz/tree`;
+  const foreign = side("candidate", {
+    transcript: [{ type: "tool_call", thread: "main", at: at(1), id: "t1", tool: "Bash", input: { command: `ls ${other}` }, kind: "shell", path: null }],
+  });
+  assert.equal(renderItem("toolLog", foreign), `shell ls ${other}`);
+});

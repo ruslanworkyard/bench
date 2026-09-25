@@ -6,7 +6,9 @@ import { dirname, join, posix } from "node:path";
 import { promisify } from "node:util";
 
 import type { HarnessSnapshot } from "./detect/harness.js";
+import { STATE_DIR } from "./config.js";
 import { CliError } from "./errors.js";
+import { globToRegex } from "./test-selection.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -28,6 +30,11 @@ export type WorkspaceOptions = {
   runId: string;
   /** Commits to clone; 0 means the whole history, hardlinked from the host. */
   depth?: number;
+  /**
+   * Globs `hide()` deletes from the tree, kept out of `diff()` and `changedFiles()` from the
+   * start. `.harnessbench` is always kept out of the diff, hidden or not: it is our state.
+   */
+  hidePaths?: string[];
 };
 
 export type ExecOptions = {
@@ -60,11 +67,16 @@ export class Workspace {
    */
   readonly tmp: string;
   readonly headSha: string;
+  readonly hidePaths: string[];
+  /** The globs kept out of every diff: `hidePaths` plus our own state directory. */
+  private readonly hidden: string[];
   /** The commands `exec` has running right now; each is the leader of its own process group. */
   private readonly children = new Set<ChildProcess>();
 
-  constructor(dir: string, headSha: string) {
+  constructor(dir: string, headSha: string, hidePaths: string[] = []) {
     this.dir = dir;
+    this.hidden = [...new Set([STATE_DIR, ...hidePaths])];
+    this.hidePaths = hidePaths;
     this.tree = join(dir, "tree");
     this.home = join(dir, "home");
     this.tmp = join(dir, "tmp");
@@ -151,14 +163,44 @@ export class Workspace {
    * The commit sha changes; `headSha` keeps naming the host commit the code came from.
    */
   async rebaseline(): Promise<void> {
-    await git(["add", "-A", "--", ".", ":(exclude).harnessbench"], this.tree);
+    await git(["add", "-A", "--", ".", ...this.excludes()], this.tree);
     await git(["commit", "--quiet", "--amend", "--no-edit", "--allow-empty"], this.tree);
   }
 
-  /** Everything the run changed in the tree, tracked or not, except our own state directory. */
+  /**
+   * Deletes every path matching `hidePaths` from the tree, or inside a directory that matches,
+   * so the agent cannot read the tool's material (its own fixture prompt). Call it after the
+   * overlay and `rebaseline()`: the deletion stays out of the commit, and the diff excludes it.
+   * Returns the paths removed, a matching directory as itself.
+   */
+  async hide(): Promise<string[]> {
+    if (this.hidePaths.length === 0) return [];
+    const patterns = this.hidePaths.map(globToRegex);
+    const listing = await git(["ls-files", "-z", "--cached", "--others"], this.tree);
+    const removed = new Set<string>();
+    for (const file of listing.split("\0")) {
+      if (file === "") continue;
+      const segments = file.split("/");
+      // The shortest prefix that matches: a hidden directory goes whole.
+      for (let n = 1; n <= segments.length; n++) {
+        const prefix = segments.slice(0, n).join("/");
+        if (patterns.some((pattern) => pattern.test(prefix))) {
+          removed.add(prefix);
+          break;
+        }
+      }
+    }
+    for (const path of removed) {
+      await rm(join(this.tree, ...path.split("/")), { recursive: true, force: true });
+      await removeEmptyParents(this.tree, path);
+    }
+    return [...removed].sort();
+  }
+
+  /** Everything the run changed in the tree, tracked or not, except the hidden paths. */
   async diff(): Promise<string> {
     await git(["add", "-N", "."], this.tree);
-    return await git(["diff", "HEAD", "--", ".", ":(exclude).harnessbench"], this.tree);
+    return await git(["diff", "HEAD", "--", ".", ...this.excludes()], this.tree);
   }
 
   /**
@@ -168,10 +210,15 @@ export class Workspace {
    */
   async changedFiles(): Promise<string[]> {
     const out = await git(
-      ["-c", "core.quotePath=false", "diff", "--name-status", "--no-renames", "HEAD", "--", ".", ":(exclude).harnessbench"],
+      ["-c", "core.quotePath=false", "diff", "--name-status", "--no-renames", "HEAD", "--", ".", ...this.excludes()],
       this.tree,
     );
     return out.split("\n").filter((line) => line !== "");
+  }
+
+  /** A hidden glob as pathspecs: the path itself, and everything under it when it is a directory. */
+  private excludes(): string[] {
+    return this.hidden.flatMap((glob) => [`:(exclude,glob)${glob}`, `:(exclude,glob)${glob}/**`]);
   }
 
   /** Kills every running command's whole process group, as a timeout would. */
@@ -210,7 +257,7 @@ export function abortAll({ keep }: { keep: boolean }): string[] {
 
 /** Clones the host repository at `ref` into a fresh temp directory. */
 export async function createWorkspace(options: WorkspaceOptions): Promise<Workspace> {
-  const { repoRoot, ref, runId, depth = 1 } = options;
+  const { repoRoot, ref, runId, depth = 1, hidePaths = [] } = options;
 
   // Resolved, because on macOS $TMPDIR is a symlink and a process's own cwd is not.
   const parent = join(await realpath(tmpdir()), "harnessbench");
@@ -237,7 +284,7 @@ export async function createWorkspace(options: WorkspaceOptions): Promise<Worksp
   // An empty hooks directory, so the host's hooks never run against the clone.
   await git(["config", "core.hooksPath", hooks], tree);
 
-  const workspace = new Workspace(dir, (await git(["rev-parse", "HEAD"], tree)).trim());
+  const workspace = new Workspace(dir, (await git(["rev-parse", "HEAD"], tree)).trim(), hidePaths);
   live.add(workspace);
   return workspace;
 }

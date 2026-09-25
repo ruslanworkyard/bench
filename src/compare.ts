@@ -26,6 +26,8 @@ export type Row = {
   classification: Classification;
   /** Why n/a, or "within noise". */
   note?: string;
+  /** Judge rows only: how long the verdict took, when its file recorded it. */
+  durationMs?: number;
 };
 
 export type Comparison = {
@@ -421,6 +423,8 @@ function verdictRow(verdict: VerdictRecord, label: string, note: string): Row {
     delta: verdict.preference === "tie" ? "tie" : `${verdict.preference} preferred`,
     classification,
     note: note.replace(/\s*\n\s*/g, " ").trim(),
+    // Older judge.json files have no duration; `typeof` because the type cannot say so.
+    ...(typeof verdict.durationMs === "number" ? { durationMs: verdict.durationMs } : {}),
   };
 }
 

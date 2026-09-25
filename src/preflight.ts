@@ -189,6 +189,9 @@ export type ResolvedJudge = {
   baseUrl: string;
   /** openai-compatible only: whether to ask the endpoint to hold the reply to the schema. */
   structuredOutputs: boolean;
+  /** The judge.json's own when it has them, else the config's; never merged, never read. */
+  providerOptions: Record<string, unknown>;
+  timeoutSeconds: number;
 };
 
 /**
@@ -230,7 +233,15 @@ export function requireJudgeModel(
   }
 
   const apiKeyEnv = judge.meta.apiKeyEnv || judgeKeyEnv(config, provider);
-  return { provider, model, apiKeyEnv, baseUrl: config.baseUrl, structuredOutputs: config.structuredOutputs };
+  return {
+    provider,
+    model,
+    apiKeyEnv,
+    baseUrl: config.baseUrl,
+    structuredOutputs: config.structuredOutputs,
+    providerOptions: judge.meta.providerOptions ?? config.providerOptions,
+    timeoutSeconds: config.timeoutSeconds,
+  };
 }
 
 /** The key stays in the environment: this checks only that the variable is set. */

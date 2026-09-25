@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { telemetry } from "../telemetry.js";
-import { parseStreamJson, StreamParser } from "./claude-code-stream.js";
+import { parseStreamJson, StreamParser, type StreamEvent } from "./claude-code-stream.js";
 import { MAX_EVENT_CHARS, type TranscriptEvent } from "./types.js";
 
 /** A recording of a real `claude -p --output-format stream-json` run, replayed from disk. */
@@ -255,4 +255,56 @@ test("a tool's input and output are bounded", () => {
   assert.equal(String((call as { input: string }).input).length, MAX_EVENT_CHARS);
   assert.equal(result?.type, "tool_result");
   assert.equal((result as { output: string }).output.length, MAX_EVENT_CHARS);
+});
+
+test("onEvent hears a turn per completed message with running usage, and a tool per call and per failed result", () => {
+  const events: StreamEvent[] = [];
+  const parser = new StreamParser({ tree: TREE, onEvent: (event) => events.push(event) });
+  for (const line of recorded("claude-stream-subagent.jsonl")) parser.push(line);
+  const parsed = parser.finish();
+
+  const turn = (n: number, input: number, output: number, cacheRead: number, cacheWrite: number, costUsd: number | null) =>
+    ({ type: "turn", turn: n, tokens: { input, output, cacheRead, cacheWrite }, costUsd }) as const;
+  const tool = (thread: string, kind: string, label: string, failed = false) => ({ type: "tool", thread, kind, label, failed });
+  assert.deepEqual(events, [
+    turn(1, 10, 20, 100, 5, null), // msg_01 completes when msg_02 starts
+    tool("main", "spawn", "spawn Task"),
+    turn(2, 11, 22, 103, 9, 0.01), // the mid-stream result reports cost and closes msg_02
+    tool("toolu_task", "read", "read src/cache.ts"),
+    turn(3, 16, 28, 110, 17, 0.01),
+    tool("toolu_task", "search", "search Grep"),
+    turn(4, 21, 34, 117, 25, 0.01),
+    turn(5, 26, 40, 124, 33, 0.01), // the sub-agent's last message ends with its spawn's result
+    tool("main", "read", "read src/cache.ts"),
+    turn(6, 27, 42, 424, 37, 0.01),
+    tool("main", "write", "write src/cache.ts"),
+    turn(7, 28, 44, 724, 41, 0.01),
+    tool("main", "read", "read /etc/hosts"),
+    turn(8, 29, 46, 1024, 45, 0.01),
+    tool("main", "read", "read /etc/hosts", true),
+    turn(9, 30, 48, 1324, 49, 0.42),
+  ]);
+  // The end-of-run parse is untouched by listening.
+  assert.deepEqual(parsed, parseStreamJson(recorded("claude-stream-subagent.jsonl"), { tree: TREE }));
+});
+
+test("a shell call's label is its command's first line, with the tree as . and a leading cd dropped", () => {
+  const events: StreamEvent[] = [];
+  const parser = new StreamParser({ tree: TREE, onEvent: (event) => events.push(event) });
+  const command = `cd ${TREE} && node --test ${TREE}/dist/a.test.js\necho done`;
+  parser.push(JSON.stringify({
+    type: "assistant",
+    message: { id: "m1", content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command } }] },
+  }));
+  parser.push(JSON.stringify({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "boom", is_error: true }] },
+  }));
+  assert.deepEqual(
+    events.filter((event) => event.type === "tool"),
+    [
+      { type: "tool", thread: "main", kind: "shell", label: "shell node --test ./dist/a.test.js", failed: false },
+      { type: "tool", thread: "main", kind: "shell", label: "shell node --test ./dist/a.test.js", failed: true },
+    ],
+  );
 });

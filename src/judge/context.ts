@@ -54,10 +54,40 @@ export function renderItem(item: SideItem, side: SideMaterial): string {
     case "finalMessage":
       return side.record.finalMessage.trim() === "" ? "(none)" : side.record.finalMessage.trimEnd();
     case "toolLog":
-      return toolLog(side.transcript);
+      return toolLog(localise(side.transcript, side.record.runId));
     case "transcript":
-      return transcript(side.transcript);
+      return transcript(localise(side.transcript, side.record.runId));
   }
+}
+
+/**
+ * The workspace tree as `$TMPDIR/harnessbench/<runId>-XXXXXX/tree` (`workspace.ts`), under any
+ * temp directory: absolute paths into it are noise to a judge and differ between the sides.
+ */
+function treePath(runId: string): RegExp {
+  const id = runId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:/[^/\\s"'\`]+)*/harnessbench/${id}-[A-Za-z0-9]{6}/tree(?![^/\\s"'\`])`, "g");
+}
+
+/** A command that starts by changing into the tree, now `.`: the `cd` says nothing. */
+const LEADING_CD = /^cd (?:\.|"\."|'\.') && /;
+
+/**
+ * Every string in the events with the tree's absolute path as `.`, and a leading `cd <tree> &&`
+ * dropped from a command, so the judge reads paths as the agent's repo-relative ones.
+ */
+function localise(events: TranscriptEvent[], runId: string): TranscriptEvent[] {
+  const tree = treePath(runId);
+  const text = (value: string): string => value.replace(tree, ".").replace(LEADING_CD, "");
+  const deep = (value: unknown): unknown => {
+    if (typeof value === "string") return text(value);
+    if (Array.isArray(value)) return value.map(deep);
+    if (typeof value === "object" && value !== null) {
+      return Object.fromEntries(Object.entries(value).map(([key, each]) => [key, deep(each)]));
+    }
+    return value;
+  };
+  return events.map((event) => deep(event) as TranscriptEvent);
 }
 
 /** Every item over `maxKb`, on either side. Nothing is truncated: a hit fails the command. */

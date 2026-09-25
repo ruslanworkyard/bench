@@ -105,7 +105,19 @@ export const claudeCode: AgentAdapter = {
     await mkdir(dirname(stderrPath), { recursive: true });
     const raw = createWriteStream(rawOutputPath);
     const errors = createWriteStream(stderrPath);
-    const parser = new StreamParser({ tree: workspace.tree });
+    const { onEvent } = request;
+    const parser = new StreamParser({
+      tree: workspace.tree,
+      onEvent:
+        onEvent === undefined
+          ? undefined
+          : (event) =>
+              onEvent(
+                event.type === "turn"
+                  ? { type: "side.turn", turn: event.turn, tokens: event.tokens, costUsd: event.costUsd }
+                  : { type: "side.tool", thread: event.thread, kind: event.kind, label: event.label, failed: event.failed },
+              ),
+    });
     let pending = "";
     let stderr = "";
 

@@ -111,6 +111,49 @@ Goal: an open-source npm package (`npx harnessbench`) people adopt. Quality over
   pair whose two runs share a stamp (then stdout shows the pair, the file the whole batch).
   `$GITHUB_STEP_SUMMARY` gets the markdown appended; the CLI reads that variable, commands take
   it as an option. Nothing else is GitHub-specific.
+- **Judges run concurrently and fail alone (2026-09-25).** Every judge call of every pair starts
+  at once (`Promise.allSettled`); a batch costs its slowest call. The pair's `judge.json` is
+  still written once, atomically, after its calls settle; a failed judge has no verdict (the row
+  shows missing; an older verdict of that judge is dropped), the others are written, then the
+  failure is thrown naming it. Judge time is reasoning output × the upstream provider's
+  throughput, which a router varies call to call (26s–7m40s for the same ~10k-token prompt), so
+  a verdict records `durationMs`, `attempts`, `upstream` (the body's `provider`, OpenRouter) and
+  `usage.reasoning`; stderr gets `[mm:ss] <fixture>  judge <id>  <preference> (12s, upstream X)`
+  and the report's judge rows `(judged in 12s)`. `judge.timeoutSeconds` (180) aborts a call and
+  retries once; that retry and the schema retry are independent, at most one of each.
+- **`judge.providerOptions` is opaque.** Config-level, or a judge.json's own which replaces it
+  whole (no merge). Wrapped under the provider package's key and passed to `generateText`
+  untouched; openai-compatible spreads unknown keys into the request body, which is how
+  OpenRouter's `provider.sort` / `reasoning.effort` reach the API. Our code reads no key of it.
+- **The agent never sees the tool's material.** `workspace.hidePaths` (globs, default
+  `[".harnessbench"]`, nothing more by default) is deleted from the tree after clone, overlay and
+  rebaseline, before setup, and excluded (`:(exclude,glob)p` + `p/**`) from `diff`,
+  `--name-status` and so test selection; `.harnessbench` is excluded even when not hidden. Agents
+  used to `cat` their own fixture prompt and write about it in MEMORY.md. Tool logs and
+  transcripts shown to a judge have the workspace tree's absolute path rewritten to `.` and a
+  leading `cd <tree> &&` dropped.
+- **Benchmarking this repo:** the package's own `fixtures/` ships the default fixtures and our
+  tests read it, so it cannot be hidden. Do not benchmark this repo with a fixture that is also
+  shipped in `fixtures/` (the agent can read its task there); use repo-only fixtures in
+  `.harnessbench/fixtures/`.
+- **Events are the only interface between work and rendering (2026-09-25).** Commands emit
+  typed `RunEvent`s (`events.ts`: `batch.start`, `side.phase`, `side.turn`, `side.tool`,
+  `side.done`, `judge.start`/`verdict`/`failed`, `batch.done`, each with `at` = ms since the
+  command started) on an `EventBus` (`emit`, `subscribe`; a throwing subscriber is a warning,
+  the others still hear it). Renderers subscribe and never compute: the stderr progress lines
+  are `render/plain.ts`, byte-identical to the old direct writes; `side.phase.detail` carries
+  the words of the line for how the previous phase ended. The Claude Code parser emits a turn
+  per completed assistant message (running usage, latest reported cost) and a tool per call and
+  per failed result, labelled as the judge's tool log labels it. Not yet events, still direct
+  `console.error`: the dirty-harness warning, `judging skipped`, `judge rows skipped`.
+- **`events.jsonl` (2026-09-25).** `run` records every event to `runs/<stamp>/events.jsonl`,
+  beside the report, starting `batch.start` and ending `batch.done`. `judge`, when its pairs are
+  one batch's, appends its events after a `{ "type": "session", "command": "judge", "startedAt" }`
+  line, written only when an event follows; its `at` counts from its own start. `compare` emits
+  nothing, so records nothing. `replay [<stamp>] [--speed <n>]` re-emits the file on a bus
+  (spacing / speed, default 10, 0 instant; a session line restarts the clock), then prints the
+  batch's `report.json` as `run` did. A batch without the file predates recording and is refused
+  naming `compare --stamp`. The UI (next) is one more subscriber; `--plain` picks today's.
 - **stdout rules for `run`, `compare`, `judge`:** stdout carries the report and nothing else —
   the one-screen summary by default (header, warnings, three verdict lines Outcome / Efficiency
   / Judges, one line per fixture with each judge's preference, the report path), the markdown
@@ -141,7 +184,7 @@ Goal: an open-source npm package (`npx harnessbench`) people adopt. Quality over
 ```
 The tool reads the host through git, writes only under `.harnessbench/`, and works in a temp
 worktree (`$TMPDIR/harnessbench/<run>/tree`) with an isolated `HOME` for the agent.
-`.harnessbench/` is excluded from the harness set and from diffs.
+`.harnessbench/` is excluded from the harness set and from diffs, and deleted from the workspace tree (`workspace.hidePaths`).
 
 ## Structural invariants (why `src/` is shaped the way it is)
 
@@ -225,6 +268,13 @@ worktree (`$TMPDIR/harnessbench/<run>/tree`) with an isolated `HOME` for the age
   from detection, `--test-files <glob>` (repeatable) to override, a `Test files` summary line,
   and the fallback hint under the test command.
 
+- **Judges concurrent, observable, bounded; task out of the workspace (2026-09-25).** See the
+  settled decisions above: concurrent judge calls, `providerOptions`, `timeoutSeconds`,
+  per-verdict timing/upstream, `workspace.hidePaths`, relative paths in tool logs.
+
+- **Events and replay (2026-09-25).** See the settled decisions above: the event bus, the plain
+  renderer, `events.jsonl`, `replay`.
+
 ## Deliberately not built
 
 Named so they are not re-proposed as ideas: baseline reuse (skipping a `previous` run whose
@@ -234,6 +284,8 @@ classification in telemetry, credential encryption or `.env.ci` variants.
 
 ## Next
 
+- A rich terminal UI (Ink) as a second subscriber, fed by the event stream and the final
+  `BatchReport`; `replay` demonstrates it without running agents.
 0. A real batch (`npx . run --judge --keep`) on this repo, three fixtures; read the roll-up and
    check the wall clock and the progress lines are legible with six sides interleaved.
 1. Test `init --dry-run` on a real repo with a real `CLAUDE.md`; check the harness list,

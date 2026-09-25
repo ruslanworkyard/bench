@@ -20,8 +20,9 @@ import { compare } from "../compare.js";
 import { requireConfig } from "../preflight.js";
 import { buildReport, type BatchReport } from "../report.js";
 import { loadJudgement } from "./compare.js";
-import { CONFIG_FILE, ENV_FILE, RUNS_DIR, type AgentConfig, type Config } from "../config.js";
+import { CONFIG_FILE, ENV_FILE, FIXTURES_DIR, RUNS_DIR, type AgentConfig, type Config } from "../config.js";
 import { readRunRecord, type Environment, type RunRecord } from "../run-record.js";
+import type { RunEvent } from "../events.js";
 
 /**
  * The real `claude` is never run here. A recorded stream is replayed by a shell script
@@ -289,6 +290,10 @@ test("run drives the agent in a workspace, once per environment, and leaves comp
   assert.doesNotMatch(dump, new RegExp(`^cwd: ${root}`, "m"));
   assert.match(readFileSync(`${ENV["FAKE_CLAUDE_DUMP"]}.stdin`, "utf8"), /time-to-live/);
   assert.equal(existsSync(join(root, "agent-was-here.txt")), false);
+  // ...and not as a file it could read: .harnessbench is hidden, and its deletion is no change.
+  assert.doesNotMatch(dump, /^files: .*\.harnessbench/m);
+  assert.ok(existsSync(join(root, FIXTURES_DIR, "ttl-cache", "prompt.md")), "the host keeps its fixtures");
+  assert.doesNotMatch(readFileSync(join(dir, "diff.patch"), "utf8"), /harnessbench/);
 
   // stdout is the summary; the whole report is on disk under the batch's stamp.
   const stamp = stampOf(root);
@@ -313,6 +318,68 @@ test("run drives the agent in a workspace, once per environment, and leaves comp
   // Once the runs are done, one line on stderr says how many and how long, and nothing follows it.
   assert.match(stderr.trimEnd().split("\n").at(-1) ?? "", /^2 runs finished in \d\d:\d\d$/);
   assert.doesNotMatch(stderr, /workspace kept/);
+});
+
+test("a batch records its events to events.jsonl, and stderr says exactly what it always has", () => {
+  const root = repoWithFake("fake-claude.sh");
+  const { stderr } = ok(root, "run", "ttl-cache");
+  const stamp = stampOf(root);
+  const sha = git(root, "rev-parse", "HEAD");
+
+  const events = readFileSync(join(root, RUNS_DIR, stamp, "events.jsonl"), "utf8")
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line) as RunEvent);
+  assert.deepEqual(events[0], {
+    at: events[0]?.at,
+    type: "batch.start",
+    stamp,
+    fixtures: ["ttl-cache"],
+    harness: { previous: sha, candidate: sha },
+    sameHarness: true,
+    agent: { name: AGENT, model: null },
+  });
+  assert.deepEqual({ ...events.at(-1), at: 0, durationMs: 0 }, { at: 0, type: "batch.done", durationMs: 0, exitCode: 0 });
+  const clocks = events.map((event) => event.at);
+  assert.deepEqual(clocks, [...clocks].sort((a, b) => a - b), "events are recorded in the order they happened");
+
+  for (const environment of ["previous", "candidate"] as const) {
+    const mine = events.filter((event) => "side" in event && event.side.environment === environment);
+    const phases = mine.flatMap((event) => (event.type === "side.phase" ? [event.phase] : []));
+    assert.deepEqual(phases, ["queued", "setup", "agent", "tests", "done"]);
+    const turns = mine.filter((event) => event.type === "side.turn");
+    assert.equal(turns.length, 4); // the recording's four assistant messages
+    const tools = mine.flatMap((event) => (event.type === "side.tool" ? [`${event.label}${event.failed ? " failed" : ""}`] : []));
+    assert.deepEqual(tools, ["read src/cache.ts", "shell npm test", "shell npm test failed"]);
+    const done = mine.at(-1);
+    assert.equal(done?.type, "side.done");
+    assert.equal(done?.type === "side.done" && done.runId, `${stamp}-ttl-cache-${environment}`);
+  }
+
+  // Byte for byte what the direct writes printed, but for clocks and durations; the sides interleave.
+  const lines = stderr
+    .trimEnd()
+    .split("\n")
+    .map((line) => line.replace(/^\[\d\d:\d\d\]/, "[mm:ss]").replace(/\(\d+\.\ds\)$/, "(n.ns)"));
+  assert.deepEqual(lines.slice(0, 4), [
+    `! the harness is identical at HEAD and at the merge base (${sha.slice(0, 7)}):`,
+    "! previous and candidate will run the same harness, so any difference",
+    "! between them is noise, not the effect of a change",
+    "running 1 fixture × 2 sides = 2 runs: ttl-cache",
+  ]);
+  for (const [environment, column] of [["previous", "previous "], ["candidate", "candidate"]] as const) {
+    assert.deepEqual(
+      lines.filter((line) => line.includes(`  ${environment} `)),
+      [
+        `[mm:ss] ttl-cache  ${column}  started`,
+        `[mm:ss] ttl-cache  ${column}  agent completed (7 turns)`,
+        `[mm:ss] ttl-cache  ${column}  tests passed (n.ns)`,
+        `[mm:ss] ttl-cache  ${column}  recorded ${RUNS_DIR}/${stamp}-ttl-cache-${environment}`,
+      ],
+    );
+  }
+  assert.equal(lines.length, 13, stderr);
+  assert.match(lines.at(-1) ?? "", /^2 runs finished in \d\d:\d\d$/);
 });
 
 test("on a branch, the previous side runs the merge-base harness on the branch's code", () => {

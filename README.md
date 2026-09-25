@@ -65,13 +65,16 @@ do first.
     "env": []
   },
   "harness": { "extraPaths": [] },
+  "workspace": { "hidePaths": [".harnessbench"] },
   "judge": {
     "provider": "anthropic",
     "model": "",
     "apiKeyEnv": "",
     "baseUrl": "",
     "structuredOutputs": true,
-    "maxContextKb": 512
+    "maxContextKb": 512,
+    "providerOptions": {},
+    "timeoutSeconds": 180
   },
   "judges": ["code-quality", "engineering-practices", "test-quality"]
 }
@@ -84,6 +87,12 @@ do first.
 - `judge.model` is written empty on purpose — pick your own; judging refuses until you do.
 - `harness.extraPaths` adds files or directories that are part of your harness but not
   detected automatically.
+- `workspace.hidePaths`: globs (`*`, `?`, `**`) deleted from each workspace before setup, so the
+  agent cannot read material that is not its task — by default `.harnessbench`, which holds the
+  fixture prompts. A matching directory goes whole. Hidden paths are kept out of the diff and the
+  test selection, so the deletion never counts as the agent's change.
+- `judge.timeoutSeconds`: a judge call that takes longer is aborted and retried once; a second
+  timeout fails that judge.
 - An unknown key is an error naming it, so a typo is never a silently ignored setting.
 
 ### The test command
@@ -204,8 +213,34 @@ Judges are a catalogue like fixtures: `.harnessbench/judges/<id>/judge.json` plu
 result only, never the log), `finalMessage`, `toolLog`, `transcript`. `prompt.md` is the rubric;
 a fixed instruction block is appended to it telling the model to judge only on that criterion,
 to answer `tie` unless the evidence shows a real difference, and to name what decided it. Add
-the id to `judges` in the config to run it; a `judge.json` may override `provider`, `model` and
-`apiKeyEnv` for itself.
+the id to `judges` in the config to run it; a `judge.json` may override `provider`, `model`,
+`apiKeyEnv` and `providerOptions` for itself.
+
+Every judge of every pair is called at once, so judging takes as long as the slowest call. A
+judge that fails costs only its own verdict; the others are written. Each verdict in
+`judge.json` records its `durationMs`, `attempts`, the `upstream` provider that served it (when
+a router reports one) and its reasoning tokens, and stderr gets a line per call:
+
+```
+[01:12] ttl-cache  judge code-quality  candidate (12s, upstream Together)
+```
+
+Judge time is mostly the model's reasoning output times the provider's throughput, and through
+a router that throughput varies call to call. `judge.providerOptions` is handed to the AI SDK
+untouched as the provider's options; for `openai-compatible` its keys go into the request body.
+With OpenRouter, sort by throughput and keep reasoning short:
+
+```json
+"judge": {
+  "provider": "openai-compatible",
+  "baseUrl": "https://openrouter.ai/api/v1",
+  "apiKeyEnv": "OPENROUTER_API_KEY",
+  "model": "<an OpenRouter model id>",
+  "providerOptions": { "provider": { "sort": "throughput" }, "reasoning": { "effort": "low" } }
+}
+```
+
+A `judge.json` may carry its own `providerOptions`; they replace the config's whole (no merge).
 
 Three drafts ship: `code-quality`, `engineering-practices`, `test-quality`. Edit them to fit
 your codebase — each one says in its first line that it is a draft.
@@ -263,6 +298,8 @@ npx harnessbench compare --fixture ttl-cache                   # latest pair of 
 npx harnessbench compare --stamp 20260922-101500               # a specific batch
 npx harnessbench compare <previous-run-id> <candidate-run-id>  # any pair
 npx harnessbench judge --fixture ttl-cache                      # judge (or re-judge) a pair
+npx harnessbench replay                                        # play the latest batch's progress back
+npx harnessbench replay 20260922-101500 --speed 0              # a specific batch, instantly
 ```
 
 Both print the same summary as `run` and rewrite the batch's `report.md` and `report.json`, so
@@ -276,6 +313,11 @@ no composite score.
 does not gate. `judge` is incremental — a verdict whose rubric has not changed is kept without a
 model call; `--all` re-judges everything. `compare --markdown` (or `--detail` on any of the
 three) prints the markdown report.
+
+Every `run` records its progress as a stream of events to `.harnessbench/runs/<stamp>/events.jsonl`
+(`judge` appends its own). `replay` plays that stream back with its original spacing divided by
+`--speed` (default 10; `0` is instant), then prints the batch's summary as `run` did. A batch
+from before event recording has no events to replay; `compare --stamp` still prints its report.
 
 ## CI
 
@@ -306,7 +348,7 @@ Bitbucket Pipelines: not written yet.
 
 ## Status
 
-Early. `init`, `run`, `compare` and `judge` work; three fixtures and three draft judges ship;
+Early. `init`, `run`, `compare`, `judge` and `replay` work; three fixtures and three draft judges ship;
 the Claude Code adapter is written and tested. Next: a position-swapped second judge call,
 CI integration, and more agent adapters.
 
@@ -315,6 +357,8 @@ Fixture design is where real examples help most.
 
 ## Changelog
 
+- Unreleased: `replay [<stamp>] [--speed <n>] [--plain]`, and every batch records its events to
+  `events.jsonl`.
 - Unreleased: `run`, `compare` and `judge` print a one-screen summary and write the full report
   to `.harnessbench/runs/<stamp>/report.md` and `report.json`. `--json` on all three now prints
   that report document; it replaces the previous per-command JSON shapes (`run`'s batch result,

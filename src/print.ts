@@ -4,10 +4,16 @@ import { JUDGE_ROW_PREFIX, type Classification, type Comparison, type Rollup, ty
 import { DEFAULT_TEST_LABEL, ENV_FILE, RUNS_DIR } from "./config.js";
 import type { HarnessEntry } from "./detect/harness.js";
 import type { Detection } from "./detect/types.js";
-import type { ProgressEvent } from "./commands/run.js";
 import type { OpStatus } from "./plan.js";
 import type { BatchReport, ReportFixture, SideSummary } from "./report.js";
-import { REPORT_MARKDOWN, reportDir, type CommandResult, type TestResult } from "./run-record.js";
+import {
+  REPORT_MARKDOWN,
+  reportDir,
+  type CommandResult,
+  type Environment,
+  type RunOutcome,
+  type TestResult,
+} from "./run-record.js";
 
 export type FileReport = { path: string; status: OpStatus };
 
@@ -208,7 +214,21 @@ export function formatProgress(
   environment: string,
   event: ProgressEvent,
 ): string {
-  return `[${clock(elapsedMs)}] ${fixture.padEnd(fixtureWidth)}  ${environment.padEnd(11)}${progressText(event)}`;
+  const judge = event.kind === "judged" || event.kind === "judge failed" ? event.judge : null;
+  return formatProgressLine(elapsedMs, fixture, fixtureWidth, environment, judge, formatProgressText(event));
+}
+
+/** `formatProgress` with its text already said; a judge line names its judge where a side line pads its environment. */
+export function formatProgressLine(
+  elapsedMs: number,
+  fixture: string,
+  fixtureWidth: number,
+  environment: string,
+  judge: string | null,
+  text: string,
+): string {
+  const who = judge === null ? environment.padEnd(11) : `${environment} ${judge}  `;
+  return `[${clock(elapsedMs)}] ${fixture.padEnd(fixtureWidth)}  ${who}${text}`;
 }
 
 /** What `run` says on stderr before any side starts: how much it is about to do. */
@@ -222,7 +242,18 @@ export function formatRunsFinished(runs: number, elapsedMs: number): string {
   return `${plural(runs, "run")} finished in ${clock(elapsedMs)}`;
 }
 
-function progressText(event: ProgressEvent): string {
+/** What a progress line says about one moment of a side or a judge call. */
+export type ProgressEvent =
+  | { kind: "started" }
+  | { kind: "setup"; result: CommandResult }
+  | { kind: "agent"; outcome: RunOutcome; turns: number }
+  | { kind: "tests"; result: TestResult }
+  | { kind: "recorded"; runId: string }
+  | { kind: "judged"; judge: string; preference: Environment | "tie"; durationMs: number; upstream: string | null }
+  | { kind: "judge failed"; judge: string; durationMs: number };
+
+/** The words of a progress line after its clock and columns. */
+export function formatProgressText(event: ProgressEvent): string {
   switch (event.kind) {
     case "started":
       return "started";
@@ -243,6 +274,12 @@ function progressText(event: ProgressEvent): string {
     }
     case "recorded":
       return `recorded ${RUNS_DIR}/${event.runId}`;
+    case "judged": {
+      const upstream = event.upstream === null ? "" : `, upstream ${event.upstream}`;
+      return `${event.preference} (${seconds(event.durationMs)}${upstream})`;
+    }
+    case "judge failed":
+      return `failed (${seconds(event.durationMs)})`;
   }
 }
 
@@ -303,7 +340,8 @@ export function formatComparisonMarkdown(c: Comparison): string {
   lines.push("| Criterion | Previous | Candidate | Delta | Result | Note |");
   lines.push("|---|---|---|---|---|---|");
   for (const row of c.rows) {
-    const cells = [row.label, row.previous, row.candidate, row.delta, row.classification, row.note ?? ""];
+    const took = row.durationMs === undefined ? "" : ` (judged in ${seconds(row.durationMs)})`;
+    const cells = [row.label, row.previous, row.candidate, row.delta, row.classification, `${row.note ?? ""}${took}`];
     lines.push(`| ${cells.map(cell).join(" | ")} |`);
   }
   return lines.join("\n");
